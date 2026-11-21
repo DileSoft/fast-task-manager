@@ -138,6 +138,12 @@ impl App {
             dark_override: settings.dark.is_some(),
         };
         app.rebuild_rows();
+        if let Ok(pid) = std::env::var("TM_PROPERTIES_PID") {
+            if let Ok(pid) = pid.parse::<u32>() {
+                app.properties = Some(pid);
+                app.properties_cmdline = Some((pid, tm_core::sys::identity::command_line(pid)));
+            }
+        }
         app
     }
 
@@ -605,58 +611,64 @@ impl App {
             egui::Window::new("Свойства")
                 .open(&mut open)
                 .collapsible(false)
-                .resizable(false)
-                .default_width(460.0)
+                .resizable(true)
+                .default_width(520.0)
+                .max_width(640.0)
+                .max_height(680.0)
                 .show(ctx, |ui| {
                     if let Some(p) = proc {
-                        ui.label(RichText::new(p.task_name()).size(17.0).strong());
+                        ui.set_max_width(560.0);
+                        ui.add(
+                            egui::Label::new(RichText::new(p.task_name()).size(17.0).strong())
+                                .wrap(),
+                        );
                         ui.add_space(6.0);
-                        egui::Grid::new("props")
-                            .num_columns(2)
-                            .spacing([16.0, 5.0])
+
+                        let mut rows: Vec<(&str, String)> = vec![
+                            ("PID", p.pid.to_string()),
+                            ("Родительский PID", p.parent_pid.to_string()),
+                            ("Сессия", p.session_id.to_string()),
+                            ("Пользователь", p.user.as_deref().unwrap_or("—").to_string()),
+                            (
+                                "Повышение прав",
+                                if p.elevated { "Да" } else { "Нет" }.to_string(),
+                            ),
+                            ("Состояние", p.status.label().to_string()),
+                            ("Группа", p.group.label().to_string()),
+                            ("Начало", fmt_filetime_local(p.create_time)),
+                            ("Время ЦП", fmt_cpu_time(p.cpu_time)),
+                            (
+                                "Память",
+                                format!(
+                                    "{} (приватно {})",
+                                    fmt_bytes(p.working_set),
+                                    fmt_bytes(p.private_bytes)
+                                ),
+                            ),
+                            ("Потоки", p.threads.to_string()),
+                            ("Дескрипторы", p.handles.to_string()),
+                        ];
+                        if p.gpu > 0.0 {
+                            rows.push(("Графический процессор", fmt_percent(p.gpu)));
+                        }
+                        rows.push(("Файл", p.exe_path.as_deref().unwrap_or("—").to_string()));
+                        if let Some((cmd_pid, Some(cmd))) = &self.properties_cmdline {
+                            if *cmd_pid == p.pid {
+                                rows.push(("Командная строка", cmd.clone()));
+                            }
+                        }
+                        rows.push((
+                            "Описание",
+                            p.description.as_deref().unwrap_or("—").to_string(),
+                        ));
+
+                        egui::ScrollArea::vertical()
+                            .max_height(400.0)
+                            .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                let mut row = |k: &str, v: String| {
-                                    ui.label(
-                                        RichText::new(k).color(self.palette.text_dim).size(12.0),
-                                    );
-                                    ui.label(RichText::new(v).size(12.5));
-                                    ui.end_row();
-                                };
-                                row("PID", p.pid.to_string());
-                                row("Родительский PID", p.parent_pid.to_string());
-                                row("Сессия", p.session_id.to_string());
-                                row("Пользователь", p.user.as_deref().unwrap_or("—").to_string());
-                                row(
-                                    "Повышение прав",
-                                    if p.elevated { "Да" } else { "Нет" }.to_string(),
-                                );
-                                row("Состояние", p.status.label().to_string());
-                                row("Группа", p.group.label().to_string());
-                                row("Начало", fmt_filetime_local(p.create_time));
-                                row("Время ЦП", fmt_cpu_time(p.cpu_time));
-                                row(
-                                    "Память",
-                                    format!(
-                                        "{} (приватно {})",
-                                        fmt_bytes(p.working_set),
-                                        fmt_bytes(p.private_bytes)
-                                    ),
-                                );
-                                row("Потоки", p.threads.to_string());
-                                row("Дескрипторы", p.handles.to_string());
-                                if p.gpu > 0.0 {
-                                    row("Графический процессор", fmt_percent(p.gpu));
+                                for (key, value) in &rows {
+                                    property_row(ui, &self.palette, key, value);
                                 }
-                                row("Файл", p.exe_path.as_deref().unwrap_or("—").to_string());
-                                if let Some((cmd_pid, Some(cmd))) = &self.properties_cmdline {
-                                    if *cmd_pid == p.pid {
-                                        row("Командная строка", cmd.clone());
-                                    }
-                                }
-                                row(
-                                    "Описание",
-                                    p.description.as_deref().unwrap_or("—").to_string(),
-                                );
                             });
                     } else {
                         ui.label("Процесс уже завершён");
@@ -844,4 +856,22 @@ pub fn fill_bg(ui: &Ui, rect: egui::Rect, palette: &Palette) {
 
 pub fn dim_label(ui: &mut Ui, palette: &Palette, text: &str) {
     ui.label(RichText::new(text).size(11.5).color(palette.text_dim));
+}
+
+/// Строка «ключ — значение» с переносом длинного значения по словам.
+fn property_row(ui: &mut Ui, palette: &Palette, key: &str, value: &str) {
+    let available = ui.available_width();
+    let key_width = 150.0_f32.min(available * 0.42);
+    let value_width = (available - key_width - 10.0).max(140.0);
+    ui.horizontal_top(|ui| {
+        ui.vertical(|ui| {
+            ui.set_width(key_width);
+            ui.add(egui::Label::new(RichText::new(key).size(11.5).color(palette.text_dim)).wrap());
+        });
+        ui.vertical(|ui| {
+            ui.set_width(value_width);
+            ui.add(egui::Label::new(RichText::new(value).size(12.5)).wrap());
+        });
+    });
+    ui.add_space(3.0);
 }
