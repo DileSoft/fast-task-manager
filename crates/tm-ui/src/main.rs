@@ -7,6 +7,7 @@ mod perf;
 mod settings;
 mod table;
 mod theme;
+mod tray;
 
 use eframe::egui;
 

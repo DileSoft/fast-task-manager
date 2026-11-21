@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Ui};
-use tm_core::{fmt_bytes, fmt_percent, fmt_rate, GroupKind, ProcInfo, ProcStatus, Snapshot};
+use tm_core::{fmt_percent, fmt_rate, GroupKind, ProcInfo, ProcStatus, Snapshot};
 
 use crate::icons::IconCache;
 use crate::theme::{self, bold, font, Palette};
@@ -173,6 +173,10 @@ pub enum Row {
         kind: GroupKind,
         cpu: f32,
         mem: u64,
+        disk: f64,
+        net: f64,
+        gpu: f32,
+        threads: u32,
         count: u32,
         expanded: bool,
     },
@@ -287,10 +291,37 @@ pub fn build_rows(view: &View<'_>) -> Vec<Row> {
             .iter()
             .map(|i| snapshot.procs[*i as usize].working_set)
             .sum();
+        let disk = members
+            .iter()
+            .map(|i| {
+                let p = &snapshot.procs[*i as usize];
+                p.disk_read_bps + p.disk_write_bps
+            })
+            .sum();
+        let net = members
+            .iter()
+            .map(|i| {
+                let p = &snapshot.procs[*i as usize];
+                p.net_recv_bps + p.net_send_bps
+            })
+            .sum();
+        let gpu = members
+            .iter()
+            .map(|i| snapshot.procs[*i as usize].gpu)
+            .sum::<f32>()
+            .clamp(0.0, 100.0);
+        let threads = members
+            .iter()
+            .map(|i| snapshot.procs[*i as usize].threads)
+            .sum();
         rows.push(Row::Group {
             kind,
             cpu,
             mem,
+            disk,
+            net,
+            gpu,
+            threads,
             count: members.len() as u32,
             expanded,
         });
@@ -613,9 +644,15 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
             kind,
             cpu,
             mem,
+            disk,
+            net,
+            gpu,
+            threads,
             count,
             expanded,
         } => {
+            let total_mem = ctx.snapshot.system.mem_total.max(1) as f64;
+            let mem_pct = (mem as f64 / total_mem * 100.0).clamp(0.0, 100.0) as f32;
             let name_rect =
                 Rect::from_min_size(rect.min, egui::vec2(ctx.cols[0].1, theme::row_h()));
             draw_chevron(
@@ -640,7 +677,17 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                     Rect::from_min_size(Pos2::new(x, rect.top()), egui::vec2(*w, theme::row_h()));
                 let text = match col {
                     Col::Cpu => fmt_percent(cpu),
-                    Col::Memory => fmt_bytes(mem),
+                    Col::Memory => fmt_percent(mem_pct),
+                    Col::Disk => fmt_rate(disk),
+                    Col::Network => fmt_rate(net),
+                    Col::Gpu => {
+                        if gpu > 0.0 {
+                            fmt_percent(gpu)
+                        } else {
+                            String::new()
+                        }
+                    }
+                    Col::Threads => threads.to_string(),
                     _ => String::new(),
                 };
                 if !text.is_empty() {
@@ -748,12 +795,14 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                         );
                     }
                     Col::Memory => {
+                        let total_mem = ctx.snapshot.system.mem_total.max(1) as f64;
+                        let pct = (proc.working_set as f64 / total_mem * 100.0) as f32;
                         theme::text_clipped(
                             ui,
                             cell,
                             Pos2::new(cell.right() - 8.0, cell.center().y),
                             Align2::RIGHT_CENTER,
-                            fmt_bytes(proc.working_set),
+                            fmt_percent(pct),
                             font(13.0),
                             palette.text,
                         );

@@ -140,6 +140,7 @@ impl App {
             dark_override: settings.dark.is_some(),
         };
         app.rebuild_rows();
+        crate::tray::start(app.ctx.clone());
         if let Ok(pid) = std::env::var("TM_PROPERTIES_PID") {
             if let Ok(pid) = pid.parse::<u32>() {
                 app.properties = Some(pid);
@@ -833,6 +834,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        crate::tray::shutdown();
         let ctx = self.ctx.clone();
         self.save_settings(&ctx);
     }
