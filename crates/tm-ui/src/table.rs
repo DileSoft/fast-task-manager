@@ -301,10 +301,11 @@ pub fn build_rows(view: &View<'_>) -> Vec<Row> {
                 })
                 .collect();
         }
+        let sums = compute_sums(&indices, snapshot);
         let mut roots = build_tree(&indices, snapshot);
-        sort_indices(&mut roots, snapshot, view.sort, view.desc);
+        sort_tree(&mut roots, snapshot, &sums, view.sort, view.desc);
         for idx in roots {
-            push_tree(idx, &indices, snapshot, view, 0, &mut rows);
+            push_tree(idx, &indices, snapshot, &sums, view, 0, &mut rows);
         }
         return rows;
     }
@@ -367,10 +368,11 @@ pub fn build_rows(view: &View<'_>) -> Vec<Row> {
         }
 
         if view.group_hierarchy {
+            let sums = compute_sums(&members, snapshot);
             let mut roots = build_tree(&members, snapshot);
-            sort_indices(&mut roots, snapshot, view.sort, view.desc);
+            sort_tree(&mut roots, snapshot, &sums, view.sort, view.desc);
             for idx in roots {
-                push_tree(idx, &members, snapshot, view, 0, &mut rows);
+                push_tree(idx, &members, snapshot, &sums, view, 0, &mut rows);
             }
         } else {
             sort_indices(&mut members, snapshot, view.sort, view.desc);
@@ -420,6 +422,7 @@ fn push_tree(
     idx: u32,
     indices: &[u32],
     snapshot: &Snapshot,
+    sums: &HashMap<u32, Sums>,
     view: &View<'_>,
     depth: u8,
     rows: &mut Vec<Row>,
@@ -436,7 +439,7 @@ fn push_tree(
         });
         return;
     }
-    sort_indices(&mut children, snapshot, view.sort, view.desc);
+    sort_tree(&mut children, snapshot, sums, view.sort, view.desc);
     let default_open = proc.group != GroupKind::Apps;
     let expanded = view
         .expansion
@@ -448,7 +451,7 @@ fn push_tree(
         depth,
         children: children.len() as u32,
         expanded,
-        sums: Some(subtree_sums(idx, indices, snapshot)),
+        sums: sums.get(&idx).copied(),
     });
     if expanded {
         for child in children {
@@ -456,6 +459,7 @@ fn push_tree(
                 child,
                 indices,
                 snapshot,
+                sums,
                 view,
                 depth.saturating_add(1),
                 rows,
@@ -464,16 +468,94 @@ fn push_tree(
     }
 }
 
-/// Суммарные ресурсы процесса и всех его потомков (включая свёрнутых).
-fn subtree_sums(idx: u32, indices: &[u32], snapshot: &Snapshot) -> Sums {
-    let proc = &snapshot.procs[idx as usize];
-    let mut total = Sums::of(proc);
-    for child in children_of(proc.pid, indices, snapshot) {
-        total.add(subtree_sums(child, indices, snapshot));
+/// Суммарные ресурсы каждого процесса и всех его потомков внутри набора.
+///
+/// Считается один раз на набор и используется и для строк, и для сортировки:
+/// родительские строки сортируются по ресурсам всего поддерева, а не только
+/// самого процесса.
+fn compute_sums(indices: &[u32], snapshot: &Snapshot) -> HashMap<u32, Sums> {
+    let present: HashSet<u32> = indices
+        .iter()
+        .map(|i| snapshot.procs[*i as usize].pid)
+        .collect();
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for &i in indices {
+        let p = &snapshot.procs[i as usize];
+        if p.parent_pid != p.pid && present.contains(&p.parent_pid) {
+            children.entry(p.parent_pid).or_default().push(i);
+        }
     }
-    total.cpu = total.cpu.clamp(0.0, 100.0);
-    total.gpu = total.gpu.clamp(0.0, 100.0);
-    total
+
+    fn fill(
+        idx: u32,
+        snapshot: &Snapshot,
+        children: &HashMap<u32, Vec<u32>>,
+        sums: &mut HashMap<u32, Sums>,
+        visiting: &mut HashSet<u32>,
+    ) -> Sums {
+        if let Some(done) = sums.get(&idx) {
+            return *done;
+        }
+        if !visiting.insert(idx) {
+            return Sums::default();
+        }
+        let proc = &snapshot.procs[idx as usize];
+        let mut total = Sums::of(proc);
+        if let Some(kids) = children.get(&proc.pid) {
+            for &kid in kids {
+                if kid == idx {
+                    continue;
+                }
+                let child = fill(kid, snapshot, children, sums, visiting);
+                total.add(child);
+            }
+        }
+        visiting.remove(&idx);
+        total.cpu = total.cpu.clamp(0.0, 100.0);
+        total.gpu = total.gpu.clamp(0.0, 100.0);
+        sums.insert(idx, total);
+        total
+    }
+
+    let mut sums = HashMap::with_capacity(indices.len());
+    let mut visiting = HashSet::new();
+    for &i in indices {
+        fill(i, snapshot, &children, &mut sums, &mut visiting);
+    }
+    sums
+}
+
+/// Сортировка строк дерева: ресурсные столбцы — по сумме поддерева.
+fn sort_tree(
+    indices: &mut [u32],
+    snapshot: &Snapshot,
+    sums: &HashMap<u32, Sums>,
+    col: Col,
+    desc: bool,
+) {
+    let sum_of = |idx: u32| sums.get(&idx).copied().unwrap_or_default();
+    indices.sort_by(|a, b| {
+        let sa = sum_of(*a);
+        let sb = sum_of(*b);
+        let ord = match col {
+            Col::Cpu => sa.cpu.partial_cmp(&sb.cpu).unwrap_or(Ordering::Equal),
+            Col::Memory => sa.mem.cmp(&sb.mem),
+            Col::Disk => sa.disk.partial_cmp(&sb.disk).unwrap_or(Ordering::Equal),
+            Col::Network => sa.net.partial_cmp(&sb.net).unwrap_or(Ordering::Equal),
+            Col::Gpu => sa.gpu.partial_cmp(&sb.gpu).unwrap_or(Ordering::Equal),
+            Col::Threads => sa.threads.cmp(&sb.threads),
+            _ => compare(
+                &snapshot.procs[*a as usize],
+                &snapshot.procs[*b as usize],
+                col,
+            ),
+        };
+        if desc {
+            ord.reverse()
+        } else {
+            ord
+        }
+    });
 }
 
 fn sort_indices(indices: &mut [u32], snapshot: &Snapshot, col: Col, desc: bool) {
