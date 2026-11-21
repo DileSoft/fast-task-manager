@@ -1,0 +1,692 @@
+//! Главное окно: вкладки, панель инструментов, таблица процессов, диалоги.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use eframe::egui::{
+    self, Align, Align2, Layout, Pos2, RichText, Sense, Stroke, StrokeKind, Ui,
+};
+use tm_core::{
+    fmt_bytes, fmt_cpu_time, fmt_filetime_local, fmt_percent, sys::actions, GroupKind, ProcInfo,
+    Snapshot, Sampler,
+};
+
+use crate::icons::IconCache;
+use crate::perf::{self, Resource};
+use crate::table::{self, Action, Col};
+use crate::theme::{self, bold, font, Palette};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Processes,
+    Performance,
+}
+
+pub struct PendingKill {
+    pub pid: u32,
+    pub hwnd: Option<isize>,
+    pub name: String,
+}
+
+pub struct App {
+    pub sampler: Sampler,
+    pub snapshot: Arc<Snapshot>,
+    pub palette: Palette,
+    pub dark: bool,
+    pub tab: Tab,
+
+    pub columns: Vec<Col>,
+    pub sort: Col,
+    pub sort_desc: bool,
+    pub search: String,
+    pub search_id: Option<egui::Id>,
+    pub group_by_type: bool,
+
+    pub selection: Option<u32>,
+    pub collapsed_groups: HashSet<GroupKind>,
+    pub expansion: HashMap<u32, bool>,
+    pub rows: Vec<table::Row>,
+    pub rows_dirty: bool,
+    pub rows_seq: u64,
+
+    pub icons: IconCache,
+    pub interval_ms: u64,
+    pub paused: bool,
+
+    pub perf_resource: Resource,
+    pub properties: Option<u32>,
+    pub pending_kill: Option<PendingKill>,
+    pub message: Option<(String, Instant, bool)>,
+}
+
+impl App {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let dark = !tm_core::sys::registry::apps_use_light_theme();
+        let palette = theme::install(&cc.egui_ctx, dark);
+        let sampler = Sampler::start(1000);
+        let snapshot = sampler.latest();
+        let mut app = Self {
+            sampler,
+            snapshot,
+            palette,
+            dark,
+            tab: if std::env::var("TM_TAB").ok().as_deref() == Some("perf") {
+                Tab::Performance
+            } else {
+                Tab::Processes
+            },
+            columns: table::DEFAULT_COLUMNS.to_vec(),
+            sort: Col::Cpu,
+            sort_desc: true,
+            search: String::new(),
+            search_id: None,
+            group_by_type: true,
+            selection: None,
+            collapsed_groups: HashSet::new(),
+            expansion: HashMap::new(),
+            rows: Vec::new(),
+            rows_dirty: true,
+            rows_seq: 0,
+            icons: IconCache::default(),
+            interval_ms: 1000,
+            paused: false,
+            perf_resource: match std::env::var("TM_PERF").ok().as_deref() {
+                Some("mem") => Resource::Memory,
+                Some("disk") => Resource::Disk,
+                Some("net") => Resource::Network,
+                Some("gpu") => Resource::Gpu,
+                _ => Resource::Cpu,
+            },
+            properties: None,
+            pending_kill: None,
+            message: None,
+        };
+        app.rebuild_rows();
+        app
+    }
+
+    pub fn selected_proc(&self) -> Option<&ProcInfo> {
+        let pid = self.selection?;
+        self.snapshot.proc_by_pid(pid)
+    }
+
+    fn rebuild_rows(&mut self) {
+        let view = table::View {
+            snapshot: &self.snapshot,
+            sort: self.sort,
+            desc: self.sort_desc,
+            search: &self.search,
+            group_by_type: self.group_by_type,
+            collapsed_groups: &self.collapsed_groups,
+            expansion: &self.expansion,
+        };
+        self.rows = table::build_rows(&view);
+        self.rows_dirty = false;
+        self.rows_seq = self.snapshot.seq;
+    }
+
+    fn set_message(&mut self, text: impl Into<String>, error: bool) {
+        self.message = Some((text.into(), Instant::now(), error));
+    }
+
+    fn apply_action(&mut self, action: Action, ctx: &egui::Context) {
+        match action {
+            Action::EndTask(pid, hwnd) => self.request_end_task(pid, hwnd),
+            Action::EndTree(pid) => {
+                match actions::end_task_tree(&self.snapshot.procs, pid) {
+                    Ok(n) => self.set_message(format!("Завершено процессов: {n}"), false),
+                    Err(e) => self.set_message(e, true),
+                }
+            }
+            Action::OpenLocation(path) => {
+                if let Err(e) = actions::open_file_location(&path) {
+                    self.set_message(e, true);
+                }
+            }
+            Action::Properties(pid) => self.properties = Some(pid),
+            Action::Copy(text) => ctx.copy_text(text),
+            Action::Elevate => {
+                if let Err(e) = actions::restart_elevated() {
+                    self.set_message(e, true);
+                } else {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
+    fn request_end_task(&mut self, pid: u32, hwnd: Option<isize>) {
+        let proc = self.snapshot.proc_by_pid(pid);
+        let critical = pid <= 4
+            || proc.map(|p| p.session_id == 0).unwrap_or(false)
+            || proc
+                .map(|p| {
+                    matches!(
+                        p.name.to_ascii_lowercase().as_str(),
+                        "explorer.exe" | "winlogon.exe" | "csrss.exe" | "wininit.exe" | "services.exe"
+                    )
+                })
+                .unwrap_or(false);
+        if critical {
+            self.pending_kill = Some(PendingKill {
+                pid,
+                hwnd,
+                name: proc.map(|p| p.name.clone()).unwrap_or_default(),
+            });
+        } else {
+            self.end_task_now(pid, hwnd);
+        }
+    }
+
+    fn end_task_now(&mut self, pid: u32, hwnd: Option<isize>) {
+        match actions::end_task(pid, hwnd) {
+            Ok(()) => self.set_message("Задача снята", false),
+            Err(e) => self.set_message(e, true),
+        }
+    }
+
+    fn apply_row_out(&mut self, out: table::RowOut, ctx: &egui::Context) {
+        if let Some(pid) = out.select {
+            self.selection = Some(pid);
+        }
+        if let Some(pid) = out.toggle_proc {
+            let proc = self.snapshot.proc_by_pid(pid);
+            let default_open = proc.map(|p| p.group != GroupKind::Apps).unwrap_or(true);
+            let current = self.expansion.get(&pid).copied().unwrap_or(default_open);
+            self.expansion.insert(pid, !current);
+            self.rows_dirty = true;
+        }
+        if let Some(kind) = out.toggle_group {
+            if !self.collapsed_groups.remove(&kind) {
+                self.collapsed_groups.insert(kind);
+            }
+            self.rows_dirty = true;
+        }
+        if let Some(pid) = out.open_properties {
+            self.properties = Some(pid);
+        }
+        for action in out.actions {
+            self.apply_action(action, ctx);
+        }
+    }
+
+    fn tab_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("tabbar")
+            .exact_height(40.0)
+            .frame(egui::Frame::NONE.fill(self.palette.bg))
+            .show(ctx, |ui| {
+                let height = ui.available_height();
+                ui.horizontal(|ui| {
+                    ui.add_space(10.0);
+                    let tabs = [(Tab::Processes, "Процессы"), (Tab::Performance, "Производительность")];
+                    for (tab, label) in tabs {
+                        let (rect, resp) = ui.allocate_exact_size(
+                            egui::vec2(if tab == Tab::Performance { 172.0 } else { 108.0 }, height),
+                            Sense::click(),
+                        );
+                        let active = self.tab == tab;
+                        if resp.hovered() && !active {
+                            ui.painter().rect_filled(rect, 0.0, self.palette.hover);
+                        }
+                        if active {
+                            let line = egui::Rect::from_min_size(
+                                Pos2::new(rect.left() + 10.0, rect.bottom() - 2.0),
+                                egui::vec2(rect.width() - 20.0, 2.0),
+                            );
+                            ui.painter().rect_filled(line, 0.0, self.palette.accent);
+                        }
+                        let color = if active {
+                            self.palette.text_strong
+                        } else {
+                            self.palette.text_dim
+                        };
+                        ui.painter().text(
+                            rect.center(),
+                            Align2::CENTER_CENTER,
+                            label,
+                            if active { bold(14.5) } else { font(14.5) },
+                            color,
+                        );
+                        if resp.clicked() {
+                            self.tab = tab;
+                        }
+                    }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(8.0);
+                        let icon = if self.dark { "☀" } else { "☾" };
+                        if ui
+                            .add(egui::Button::new(RichText::new(icon).size(16.0)).frame(false))
+                            .on_hover_text("Сменить тему")
+                            .clicked()
+                        {
+                            self.dark = !self.dark;
+                            self.palette = theme::install(ctx, self.dark);
+                        }
+                        if self.snapshot.system.admin {
+                            ui.label(
+                                RichText::new("Администратор")
+                                    .size(11.5)
+                                    .color(self.palette.ok),
+                            );
+                        }
+                    });
+                });
+            });
+    }
+
+    fn toolbar(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        let can_kill = self
+            .selected_proc()
+            .map(|p| p.pid > 4)
+            .unwrap_or(false);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            if ui
+                .add_enabled(can_kill, egui::Button::new("Снять задачу"))
+                .clicked()
+            {
+                if let Some(p) = self.selected_proc() {
+                    let (pid, hwnd) = (p.pid, p.window);
+                    self.request_end_task(pid, hwnd);
+                }
+            }
+
+            ui.add_space(10.0);
+            let resp = ui.add_sized(
+                [170.0, 22.0],
+                egui::TextEdit::singleline(&mut self.search)
+                    .hint_text("Поиск процесса")
+                    .desired_width(170.0),
+            );
+            self.search_id = Some(resp.id);
+            if resp.changed() {
+                self.rows_dirty = true;
+            }
+
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(8.0);
+                egui::ComboBox::from_id_salt("speed")
+                    .selected_text(self.speed_label())
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        let mut changed = false;
+                        changed |= ui.selectable_value(&mut self.interval_ms, 500, "Высокая").changed();
+                        changed |= ui.selectable_value(&mut self.interval_ms, 1000, "Обычная").changed();
+                        changed |= ui.selectable_value(&mut self.interval_ms, 2000, "Низкая").changed();
+                        if ui
+                            .selectable_label(self.paused, "Приостановить")
+                            .clicked()
+                        {
+                            self.paused = !self.paused;
+                            self.sampler.set_paused(self.paused);
+                        }
+                        if changed {
+                            self.paused = false;
+                            self.sampler.set_paused(false);
+                            self.sampler.set_interval(self.interval_ms);
+                        }
+                    });
+                table::columns_menu(ui, &self.palette, &mut self.columns);
+                ui.menu_button("Вид", |ui| {
+                    if ui
+                        .checkbox(&mut self.group_by_type, "Группировать по типу")
+                        .changed()
+                    {
+                        self.rows_dirty = true;
+                    }
+                    if ui.button("Обновить").clicked() {
+                        self.sampler.refresh_now();
+                        ui.close_menu();
+                    }
+                });
+            });
+        });
+        let _ = ctx;
+    }
+
+    fn speed_label(&self) -> &'static str {
+        if self.paused {
+            "Приостановлено"
+        } else {
+            match self.interval_ms {
+                0..=600 => "Высокая (0,5 с)",
+                601..=1500 => "Обычная (1 с)",
+                _ => "Низкая (2 с)",
+            }
+        }
+    }
+
+    fn processes_tab(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        self.toolbar(ui, ctx);
+        ui.add_space(2.0);
+
+        if !self.snapshot.capabilities.per_process_io {
+            let text = if !self.snapshot.system.admin {
+                "Диск и сеть по процессам требуют прав администратора.".to_string()
+            } else if let Some(e) = &self.snapshot.capabilities.etw_error {
+                format!("Данные ETW недоступны. {}", e)
+            } else {
+                "Диск и сеть по процессам временно недоступны.".to_string()
+            };
+            if table::draw_banner(ui, &self.palette, &text) {
+                self.apply_action(Action::Elevate, ctx);
+            }
+            ui.add_space(2.0);
+        }
+
+        let cols = table::layout(ui.available_width() - 10.0, &self.columns);
+        if let Some(col) = table::header(ui, &self.palette, &cols, self.sort, self.sort_desc) {
+            if self.sort == col {
+                self.sort_desc = !self.sort_desc;
+            } else {
+                self.sort = col;
+                self.sort_desc = matches!(col, Col::Cpu | Col::Memory | Col::Disk | Col::Network | Col::Gpu | Col::Threads);
+            }
+            self.rows_dirty = true;
+        }
+
+        let rows = self.rows.clone();
+        let mut out = table::RowOut::new();
+        let mut icons = std::mem::take(&mut self.icons);
+        {
+            let mut draw_ctx = table::DrawCtx {
+                palette: &self.palette,
+                snapshot: &self.snapshot,
+                cols: &cols,
+                selected: self.selection,
+                icons: &mut icons,
+            };
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show_rows(ui, theme::ROW_H, rows.len(), |ui, range| {
+                    for i in range {
+                        table::draw_row(ui, &mut draw_ctx, rows[i], &mut out);
+                    }
+                });
+        }
+        self.icons = icons;
+        self.apply_row_out(out, ctx);
+    }
+
+    fn status_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("status")
+            .exact_height(26.0)
+            .frame(egui::Frame::NONE.fill(self.palette.panel))
+            .show(ctx, |ui| {
+                let s = &self.snapshot.system;
+                let mem_pct = if s.mem_total > 0 {
+                    s.mem_used as f32 / s.mem_total as f32 * 100.0
+                } else {
+                    0.0
+                };
+                ui.horizontal(|ui| {
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new(format!("Процессы: {}", self.snapshot.procs.len()))
+                            .size(12.0)
+                            .color(self.palette.text_dim),
+                    );
+                    ui.label(
+                        RichText::new(format!("ЦП: {}", fmt_percent(s.cpu_total)))
+                            .size(12.0)
+                            .color(self.palette.text_dim),
+                    );
+                    ui.label(
+                        RichText::new(format!("Память: {}", fmt_percent(mem_pct)))
+                            .size(12.0)
+                            .color(self.palette.text_dim),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(10.0);
+                        let etw = if self.snapshot.capabilities.etw_active {
+                            ("ETW активно", self.palette.ok)
+                        } else {
+                            ("ETW: нет прав", self.palette.warn)
+                        };
+                        ui.label(RichText::new(etw.0).size(11.5).color(etw.1));
+                        if std::env::var_os("TM_DEBUG_ICONS").is_some() {
+                            let paths = self
+                                .snapshot
+                                .procs
+                                .iter()
+                                .filter(|p| p.exe_path.is_some())
+                                .count();
+                            ui.label(
+                                RichText::new(format!(
+                                    "иконки {}/{} путей {}",
+                                    self.icons.loaded(),
+                                    self.icons.len(),
+                                    paths
+                                ))
+                                .size(11.5)
+                                .color(self.palette.warn),
+                            );
+                        }
+                    });
+                });
+            });
+    }
+
+    fn dialogs(&mut self, ctx: &egui::Context) {
+        if let Some(pid) = self.properties {
+            let mut open = true;
+            let proc = self.snapshot.proc_by_pid(pid);
+            egui::Window::new("Свойства")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .default_width(460.0)
+                .show(ctx, |ui| {
+                    if let Some(p) = proc {
+                        ui.label(RichText::new(p.task_name()).size(17.0).strong());
+                        ui.add_space(6.0);
+                        egui::Grid::new("props")
+                            .num_columns(2)
+                            .spacing([16.0, 5.0])
+                            .show(ui, |ui| {
+                                let mut row = |k: &str, v: String| {
+                                    ui.label(RichText::new(k).color(self.palette.text_dim).size(12.0));
+                                    ui.label(RichText::new(v).size(12.5));
+                                    ui.end_row();
+                                };
+                                row("PID", p.pid.to_string());
+                                row("Родительский PID", p.parent_pid.to_string());
+                                row("Сессия", p.session_id.to_string());
+                                row("Пользователь", p.user.as_deref().unwrap_or("—").to_string());
+                                row(
+                                    "Повышение прав",
+                                    if p.elevated { "Да" } else { "Нет" }.to_string(),
+                                );
+                                row("Состояние", p.status.label().to_string());
+                                row("Группа", p.group.label().to_string());
+                                row("Начало", fmt_filetime_local(p.create_time));
+                                row("Время ЦП", fmt_cpu_time(p.cpu_time));
+                                row(
+                                    "Память",
+                                    format!(
+                                        "{} (приватно {})",
+                                        fmt_bytes(p.working_set),
+                                        fmt_bytes(p.private_bytes)
+                                    ),
+                                );
+                                row("Потоки", p.threads.to_string());
+                                row("Дескрипторы", p.handles.to_string());
+                                if p.gpu > 0.0 {
+                                    row("Графический процессор", fmt_percent(p.gpu));
+                                }
+                                row(
+                                    "Файл",
+                                    p.exe_path.as_deref().unwrap_or("—").to_string(),
+                                );
+                                row(
+                                    "Описание",
+                                    p.description.as_deref().unwrap_or("—").to_string(),
+                                );
+                            });
+                    } else {
+                        ui.label("Процесс уже завершён");
+                    }
+                });
+            if !open {
+                self.properties = None;
+            }
+        }
+
+        if let Some(pending) = &self.pending_kill {
+            let open = true;
+            let mut confirmed = false;
+            let mut cancelled = false;
+            egui::Window::new("Завершение процесса")
+                .collapsible(false)
+                .resizable(false)
+                .default_width(420.0)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "Завершить критический процесс «{}» (PID {})?",
+                        pending.name, pending.pid
+                    ));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Завершить").clicked() {
+                            confirmed = true;
+                        }
+                        if ui.button("Отмена").clicked() {
+                            cancelled = true;
+                        }
+                    });
+                });
+            let (pid, hwnd) = (pending.pid, pending.hwnd);
+            if confirmed {
+                self.end_task_now(pid, hwnd);
+                self.pending_kill = None;
+            } else if cancelled || !open {
+                self.pending_kill = None;
+            }
+        }
+
+        if let Some((text, at, error)) = &self.message {
+            if at.elapsed() < Duration::from_secs(5) {
+                egui::Area::new(egui::Id::new("toast"))
+                    .anchor(Align2::RIGHT_BOTTOM, egui::vec2(-14.0, -38.0))
+                    .show(ctx, |ui| {
+                        egui::Frame::NONE
+                            .fill(self.palette.panel)
+                            .stroke(Stroke::new(
+                                1.0_f32,
+                                if *error {
+                                    self.palette.warn
+                                } else {
+                                    self.palette.border
+                                },
+                            ))
+                            .inner_margin(egui::Margin::symmetric(10, 6))
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(text).size(12.5));
+                            });
+                    });
+            } else {
+                self.message = None;
+            }
+        }
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let snap = self.sampler.latest();
+        if snap.seq != self.snapshot.seq {
+            self.snapshot = snap;
+            self.rows_dirty = true;
+        }
+        if self.rows_dirty {
+            self.rebuild_rows();
+        }
+
+        if std::env::var_os("TM_DEBUG_LAYOUT").is_some() {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                eprintln!(
+                    "layout: ppp={} screen={:?} window={:?}",
+                    ctx.pixels_per_point(),
+                    ctx.screen_rect(),
+                    ctx.input(|i| i.viewport().inner_rect)
+                );
+            });
+        }
+
+        // Ctrl+F — фокус в поиск; Delete — снять задачу с выбранного.
+        let (ctrl_f, delete, f5) = ctx.input(|i| {
+            (
+                i.modifiers.command && i.key_pressed(egui::Key::F),
+                i.key_pressed(egui::Key::Delete),
+                i.key_pressed(egui::Key::F5),
+            )
+        });
+        if ctrl_f {
+            if let Some(id) = self.search_id {
+                ctx.memory_mut(|m| m.request_focus(id));
+            }
+        }
+        if f5 {
+            self.sampler.refresh_now();
+        }
+        if delete {
+            if let Some(p) = self.selected_proc() {
+                let (pid, hwnd) = (p.pid, p.window);
+                self.request_end_task(pid, hwnd);
+            }
+        }
+
+        self.tab_bar(ctx);
+        self.status_bar(ctx);
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(self.palette.bg))
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(6.0);
+                });
+                match self.tab {
+                    Tab::Processes => self.processes_tab(ui, ctx),
+                    Tab::Performance => perf::ui(self, ui),
+                }
+            });
+
+        self.dialogs(ctx);
+        ctx.request_repaint_after(Duration::from_millis(200));
+    }
+}
+
+/// Хелпер для вкладки производительности: подписи и плитки.
+pub fn stat_card(ui: &mut Ui, palette: &Palette, label: &str, value: &str, width: f32) {
+    egui::Frame::NONE
+        .fill(palette.panel)
+        .stroke(Stroke::new(1.0_f32, palette.border))
+        .inner_margin(egui::Margin::symmetric(8, 5))
+        .show(ui, |ui| {
+            ui.set_min_width(width);
+            ui.vertical(|ui| {
+                ui.label(RichText::new(label).size(11.0).color(palette.text_dim));
+                ui.label(RichText::new(value).size(14.0).color(palette.text_strong));
+            });
+        });
+}
+
+pub fn graph_rect(ui: &mut Ui, height: f32) -> egui::Rect {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+    rect
+}
+
+pub fn fill_bg(ui: &Ui, rect: egui::Rect, palette: &Palette) {
+    ui.painter().rect_filled(rect, 0.0, palette.panel);
+    ui.painter()
+        .rect_stroke(rect, 0.0, Stroke::new(1.0_f32, palette.border), StrokeKind::Inside);
+}
+
+pub fn dim_label(ui: &mut Ui, palette: &Palette, text: &str) {
+    ui.label(RichText::new(text).size(11.5).color(palette.text_dim));
+}
