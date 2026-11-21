@@ -522,7 +522,6 @@ impl Collector {
             self.disk_space_cache = mem::disk_space();
             self.disk_space_tick = self.seq;
         }
-        let refresh_capacity = self.disk_space_tick == self.seq;
         let refresh_capacity = self.disk_space_tick == self.seq
             || disk_map
                 .keys()
