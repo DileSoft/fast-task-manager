@@ -12,7 +12,7 @@ use arc_swap::ArcSwap;
 
 use crate::etw::{self, Etw};
 use crate::snapshot::*;
-use crate::sys::{identity, mem, net, nt, pdh, registry, window};
+use crate::sys::{disk, identity, mem, net, nt, pdh, registry, window};
 
 const HISTORY_LEN: usize = 600;
 const IDENTITY_BUDGET_PER_TICK: usize = 48;
@@ -159,6 +159,7 @@ struct Collector {
     disk_space_cache: (u64, u64, u32),
     disk_space_tick: u64,
     disk_capacity: HashMap<u32, (u64, u64)>,
+    disk_models: HashMap<u32, String>,
     disk_hist: HashMap<u32, Vec<f32>>,
     net_hist_recv: HashMap<String, Vec<f32>>,
     net_hist_send: HashMap<String, Vec<f32>>,
@@ -198,6 +199,7 @@ impl Collector {
             disk_space_cache: (0, 0, 0),
             disk_space_tick: 0,
             disk_capacity: HashMap::new(),
+            disk_models: HashMap::new(),
             disk_hist: HashMap::new(),
             net_hist_recv: HashMap::new(),
             net_hist_send: HashMap::new(),
@@ -536,6 +538,12 @@ impl Collector {
                 self.disk_capacity
                     .insert(0, (self.disk_space_cache.0, self.disk_space_cache.1));
             }
+            // Модель диска запрашиваем редко: она не меняется на ходу.
+            self.disk_models.clear();
+            for number in disk_map.keys() {
+                self.disk_models
+                    .insert(*number, disk::model(*number).unwrap_or_default());
+            }
         }
 
         let mut numbers: Vec<u32> = disk_map.keys().copied().collect();
@@ -550,6 +558,7 @@ impl Collector {
             push_history(hist, active);
             disks.push(DiskStats {
                 name: format!("Диск {number}"),
+                model: self.disk_models.get(number).cloned().unwrap_or_default(),
                 volumes,
                 active,
                 read_bps,
@@ -566,6 +575,7 @@ impl Collector {
             push_history(hist, disk_active);
             disks.push(DiskStats {
                 name: "Диск 0".to_string(),
+                model: self.disk_models.get(&0).cloned().unwrap_or_default(),
                 volumes: String::new(),
                 active: disk_active,
                 read_bps: disk_read_bps,

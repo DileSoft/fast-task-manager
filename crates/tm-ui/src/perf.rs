@@ -65,13 +65,7 @@ fn label(snapshot: &Snapshot, res: Resource) -> String {
         Resource::Disk(i) => snapshot
             .disks
             .get(i)
-            .map(|d| {
-                if d.volumes.is_empty() {
-                    d.name.clone()
-                } else {
-                    format!("{} ({})", d.name, d.volumes)
-                }
-            })
+            .map(|d| d.name.clone())
             .unwrap_or_else(|| "Диск".to_string()),
         Resource::Network(i) => snapshot
             .nets
@@ -82,107 +76,59 @@ fn label(snapshot: &Snapshot, res: Resource) -> String {
     }
 }
 
-/// Раздел левого меню: заголовок, подпись с названием оборудования и ресурсы.
-struct Section {
-    title: &'static str,
-    detail: String,
-    items: Vec<Resource>,
-}
-
-fn plural(n: usize, one: &str, few: &str, many: &str) -> String {
-    let tail = n % 100;
-    let form = if (11..=14).contains(&tail) {
-        many
-    } else {
-        match n % 10 {
-            1 => one,
-            2..=4 => few,
-            _ => many,
-        }
-    };
-    format!("{n} {form}")
-}
-
-fn sections(snapshot: &Snapshot) -> Vec<Section> {
+/// Подзаголовок пункта: название оборудования, к которому относится ресурс.
+fn detail(snapshot: &Snapshot, res: Resource) -> String {
     let s = &snapshot.system;
-    let mut out = Vec::with_capacity(5);
-
-    out.push(Section {
-        title: "ЦП",
-        detail: s.cpu_name.clone(),
-        items: vec![Resource::Cpu],
-    });
-    out.push(Section {
-        title: "Память",
-        detail: format!("{} ОЗУ", fmt_bytes(s.mem_total)),
-        items: vec![Resource::Memory],
-    });
-
-    let disks: Vec<Resource> = (0..snapshot.disks.len()).map(Resource::Disk).collect();
-    if !disks.is_empty() {
-        let volumes: Vec<&str> = snapshot
+    match res {
+        Resource::Cpu => s.cpu_name.clone(),
+        Resource::Memory => format!("ОЗУ · {}", fmt_bytes(s.mem_total)),
+        Resource::Disk(i) => snapshot
             .disks
-            .iter()
-            .map(|d| d.volumes.trim())
-            .filter(|v| !v.is_empty())
-            .collect();
-        let detail = if volumes.is_empty() {
-            plural(
-                snapshot.disks.len(),
-                "физический диск",
-                "физических диска",
-                "физических дисков",
-            )
-        } else {
-            format!(
-                "{}  ·  тома {}",
-                plural(snapshot.disks.len(), "диск", "диска", "дисков"),
-                volumes.join(", ")
-            )
-        };
-        out.push(Section {
-            title: "Диски",
-            detail,
-            items: disks,
-        });
-    }
-
-    let nets: Vec<Resource> = (0..snapshot.nets.len()).map(Resource::Network).collect();
-    if !nets.is_empty() {
-        let hardware = snapshot
+            .get(i)
+            .map(|d| {
+                let model = d.model.trim();
+                let volumes = d.volumes.trim();
+                match (volumes.is_empty(), model.is_empty()) {
+                    (false, false) => format!("{volumes}  ·  {model}"),
+                    (true, false) => model.to_string(),
+                    (false, true) => format!("тома {volumes}"),
+                    (true, true) => "физический диск".to_string(),
+                }
+            })
+            .unwrap_or_default(),
+        Resource::Network(i) => snapshot
             .nets
-            .iter()
-            .map(|n| n.description.trim())
-            .find(|d| !d.is_empty())
-            .map(|d| d.to_string())
-            .unwrap_or_else(|| plural(snapshot.nets.len(), "адаптер", "адаптера", "адаптеров"));
-        let extra = snapshot.nets.len().saturating_sub(1);
-        let detail = if extra > 0 {
-            format!("{hardware}  ·  +{extra}")
-        } else {
-            hardware
-        };
-        out.push(Section {
-            title: "Сеть",
-            detail,
-            items: nets,
-        });
+            .get(i)
+            .map(|n| {
+                if n.description.trim().is_empty() {
+                    "сетевой адаптер".to_string()
+                } else {
+                    n.description.clone()
+                }
+            })
+            .unwrap_or_default(),
+        Resource::Gpu => {
+            if s.gpu_name.trim().is_empty() {
+                "графический процессор".to_string()
+            } else {
+                s.gpu_name.clone()
+            }
+        }
     }
+}
 
+fn available(snapshot: &Snapshot) -> Vec<Resource> {
+    let mut list = vec![Resource::Cpu, Resource::Memory];
+    for i in 0..snapshot.disks.len() {
+        list.push(Resource::Disk(i));
+    }
+    for i in 0..snapshot.nets.len() {
+        list.push(Resource::Network(i));
+    }
     if snapshot.capabilities.gpu_available || snapshot.system.gpu_dedicated > 0 {
-        let detail = if s.gpu_name.trim().is_empty() {
-            "Графический процессор".to_string()
-        } else {
-            s.gpu_name.clone()
-        };
-        out.push(Section {
-            title: "Графический процессор",
-            detail,
-            items: vec![Resource::Gpu],
-        });
+        list.push(Resource::Gpu);
     }
-
-    out
+    list
 }
 
 fn value(snapshot: &Snapshot, res: Resource) -> String {
@@ -236,11 +182,7 @@ fn series(snapshot: &Snapshot, res: Resource) -> Vec<f32> {
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let snapshot = app.snapshot.clone();
     let palette = app.palette;
-    let sections = sections(&snapshot);
-    let resources: Vec<Resource> = sections
-        .iter()
-        .flat_map(|s| s.items.iter().copied())
-        .collect();
+    let resources = available(&snapshot);
     if !resources.contains(&app.perf_resource) {
         app.perf_resource = resources.first().copied().unwrap_or(Resource::Cpu);
     }
@@ -261,23 +203,11 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     .show(ui, |ui| {
                         ui.set_width(left_width - 10.0);
                         ui.add_space(2.0);
-                        for (index, section) in sections.iter().enumerate() {
-                            left_header(ui, &palette, section.title, &section.detail, index > 0);
-                            for res in &section.items {
-                                let selected = app.perf_resource == *res;
-                                let data = series(&snapshot, *res);
-                                if left_item(
-                                    ui,
-                                    &palette,
-                                    &label(&snapshot, *res),
-                                    value(&snapshot, *res),
-                                    &data,
-                                    res.color(&palette),
-                                    selected,
-                                ) {
-                                    app.perf_resource = *res;
-                                    app.settings_dirty = true;
-                                }
+                        for res in &resources {
+                            let selected = app.perf_resource == *res;
+                            if left_item(ui, &palette, &snapshot, *res, selected) {
+                                app.perf_resource = *res;
+                                app.settings_dirty = true;
                             }
                         }
                         ui.add_space(6.0);
@@ -304,66 +234,23 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-/// Подзаголовок раздела: категория и название оборудования под ней.
-fn left_header(ui: &mut egui::Ui, palette: &Palette, title: &str, detail: &str, separator: bool) {
-    let width = ui.available_width();
-    let height = if detail.is_empty() { 26.0 } else { 40.0 };
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
-    let painter = ui.painter();
-
-    if separator {
-        painter.line_segment(
-            [
-                Pos2::new(rect.left() + 10.0, rect.top()),
-                Pos2::new(rect.right() - 6.0, rect.top()),
-            ],
-            egui::Stroke::new(1.0_f32, palette.border),
-        );
-    }
-
-    let clip = egui::Rect::from_min_max(
-        Pos2::new(rect.left() + 8.0, rect.top()),
-        Pos2::new(rect.right() - 6.0, rect.bottom()),
-    );
-    theme_text(
-        ui,
-        Pos2::new(rect.left() + 10.0, rect.top() + 11.0),
-        Align2::LEFT_CENTER,
-        title.to_uppercase(),
-        bold(11.0),
-        palette.text_dim,
-    );
-    if !detail.is_empty() {
-        crate::theme::text_clipped(
-            ui,
-            clip,
-            Pos2::new(rect.left() + 10.0, rect.top() + 27.0),
-            Align2::LEFT_CENTER,
-            detail,
-            font(11.5),
-            palette.text,
-        );
-    }
-
-    let tip = if detail.is_empty() {
-        title.to_string()
-    } else {
-        format!("{title} · {detail}")
-    };
-    resp.on_hover_text(tip);
-}
-
 fn left_item(
     ui: &mut egui::Ui,
     palette: &Palette,
-    label: &str,
-    value: String,
-    series: &[f32],
-    color: egui::Color32,
+    snapshot: &Snapshot,
+    res: Resource,
     selected: bool,
 ) -> bool {
+    let label = label(snapshot, res);
+    let detail = detail(snapshot, res);
+    let value = value(snapshot, res);
+    let data = series(snapshot, res);
+    let color = res.color(palette);
+    let label = label.as_str();
+    let detail = detail.as_str();
+    let series = data.as_slice();
     let width = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 56.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 66.0), Sense::click());
     let painter = ui.painter();
     if selected {
         painter.rect_filled(rect, 2.0, palette.selected);
@@ -376,36 +263,54 @@ fn left_item(
         painter.rect_filled(rect, 2.0, palette.hover);
     }
 
-    theme_text(
-        ui,
-        Pos2::new(rect.left() + 12.0, rect.top() + 36.0),
-        Align2::LEFT_CENTER,
-        value,
-        font(12.0),
-        palette.text_dim,
-    );
     let label_clip = egui::Rect::from_min_max(
         Pos2::new(rect.left() + 10.0, rect.top()),
-        Pos2::new(rect.right() - 92.0, rect.bottom()),
+        Pos2::new(rect.right() - 92.0, rect.top() + 26.0),
     );
     crate::theme::text_clipped(
         ui,
         label_clip,
-        Pos2::new(rect.left() + 12.0, rect.top() + 16.0),
+        Pos2::new(rect.left() + 12.0, rect.top() + 13.0),
         Align2::LEFT_CENTER,
         label,
         bold(12.5),
         palette.text_strong,
     );
+    theme_text(
+        ui,
+        Pos2::new(rect.left() + 12.0, rect.top() + 32.0),
+        Align2::LEFT_CENTER,
+        value,
+        font(12.0),
+        palette.text,
+    );
+    let detail_clip = egui::Rect::from_min_max(
+        Pos2::new(rect.left() + 10.0, rect.top() + 38.0),
+        Pos2::new(rect.right() - 6.0, rect.bottom()),
+    );
+    crate::theme::text_clipped(
+        ui,
+        detail_clip,
+        Pos2::new(rect.left() + 12.0, rect.top() + 51.0),
+        Align2::LEFT_CENTER,
+        detail,
+        font(10.5),
+        palette.text_dim,
+    );
 
     let spark = egui::Rect::from_min_size(
-        Pos2::new(rect.right() - 86.0, rect.top() + 14.0),
-        egui::vec2(74.0, 30.0),
+        Pos2::new(rect.right() - 86.0, rect.top() + 16.0),
+        egui::vec2(74.0, 28.0),
     );
     if spark.left() > rect.left() + 100.0 {
         graph::sparkline(ui, spark, series, color, palette);
     }
-    resp.on_hover_text(label).clicked()
+    let tip = if detail.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label}\n{detail}")
+    };
+    resp.on_hover_text(tip).clicked()
 }
 
 fn theme_text(

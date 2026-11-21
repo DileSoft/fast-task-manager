@@ -1,6 +1,7 @@
 //! Тонкие обёртки над Win32/NT API. Всё, что дороже кэша, вызывается снаружи.
 
 pub mod actions;
+pub mod disk;
 pub mod identity;
 pub mod mem;
 pub mod net;

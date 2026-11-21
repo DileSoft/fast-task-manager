@@ -166,6 +166,8 @@ pub struct SystemStats {
 pub struct DiskStats {
     /// «Диск 0».
     pub name: String,
+    /// Модель оборудования: «Samsung SSD 860 EVO».
+    pub model: String,
     /// Тома этого диска: «C: D:».
     pub volumes: String,
     pub active: f32,

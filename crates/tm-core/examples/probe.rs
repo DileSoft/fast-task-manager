@@ -103,7 +103,15 @@ fn main() {
         "диски: {:?}",
         snap.disks
             .iter()
-            .map(|d| (d.name.as_str(), d.volumes.as_str(), d.active, d.total))
+            .map(|d| {
+                (
+                    d.name.as_str(),
+                    d.model.as_str(),
+                    d.volumes.as_str(),
+                    d.active,
+                    d.total,
+                )
+            })
             .collect::<Vec<_>>()
     );
     println!(
