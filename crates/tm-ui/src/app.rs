@@ -41,6 +41,7 @@ pub struct App {
     pub search: String,
     pub search_id: Option<egui::Id>,
     pub group_by_type: bool,
+    pub group_hierarchy: bool,
 
     pub selection: Option<u32>,
     pub collapsed_groups: HashSet<GroupKind>,
@@ -112,6 +113,7 @@ impl App {
             search: String::new(),
             search_id: None,
             group_by_type: settings.group_by_type,
+            group_hierarchy: settings.group_hierarchy,
             selection: None,
             collapsed_groups: HashSet::new(),
             expansion: HashMap::new(),
@@ -158,6 +160,7 @@ impl App {
             sort: self.sort.key().to_string(),
             sort_desc: self.sort_desc,
             group_by_type: self.group_by_type,
+            group_hierarchy: self.group_hierarchy,
             interval_ms: self.interval_ms,
             paused: self.paused,
             dark: if self.dark_override {
@@ -200,6 +203,7 @@ impl App {
             desc: self.sort_desc,
             search: &self.search,
             group_by_type: self.group_by_type,
+            group_hierarchy: self.group_hierarchy,
             collapsed_groups: &self.collapsed_groups,
             expansion: &self.expansion,
         };
@@ -452,7 +456,18 @@ impl App {
                 table::columns_menu(ui, &self.palette, &mut self.columns);
                 ui.menu_button("Вид", |ui| {
                     if ui
-                        .checkbox(&mut self.group_by_type, "Группировать по типу")
+                        .checkbox(&mut self.group_hierarchy, "Группировать по иерархии")
+                        .on_hover_text("Дерево родительских и дочерних процессов")
+                        .changed()
+                    {
+                        self.rows_dirty = true;
+                        self.settings_dirty = true;
+                    }
+                    if ui
+                        .checkbox(
+                            &mut self.group_by_type,
+                            "Группировать по типу (приложения / фоновые)",
+                        )
                         .changed()
                     {
                         self.rows_dirty = true;

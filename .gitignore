@@ -3,3 +3,4 @@
 *.pdb
 err.txt
 out.txt
+/release

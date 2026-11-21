@@ -201,6 +201,7 @@ pub struct View<'a> {
     pub desc: bool,
     pub search: &'a str,
     pub group_by_type: bool,
+    pub group_hierarchy: bool,
     pub collapsed_groups: &'a HashSet<GroupKind>,
     pub expansion: &'a HashMap<u32, bool>,
 }
@@ -246,21 +247,29 @@ pub fn build_rows(view: &View<'_>) -> Vec<Row> {
     let mut rows = Vec::with_capacity(indices.len() + 3);
 
     if !view.group_by_type {
-        let mut flat = indices;
-        sort_indices(&mut flat, snapshot, view.sort, view.desc);
-        return flat
-            .into_iter()
-            .map(|idx| Row::Proc {
-                idx,
-                depth: 0,
-                children: 0,
-                expanded: false,
-            })
-            .collect();
+        if !view.group_hierarchy {
+            let mut flat = indices;
+            sort_indices(&mut flat, snapshot, view.sort, view.desc);
+            return flat
+                .into_iter()
+                .map(|idx| Row::Proc {
+                    idx,
+                    depth: 0,
+                    children: 0,
+                    expanded: false,
+                })
+                .collect();
+        }
+        let mut roots = build_tree(&indices, snapshot);
+        sort_indices(&mut roots, snapshot, view.sort, view.desc);
+        for idx in roots {
+            push_tree(idx, &indices, snapshot, view, 0, &mut rows);
+        }
+        return rows;
     }
 
     for kind in order {
-        let members: Vec<u32> = indices
+        let mut members: Vec<u32> = indices
             .iter()
             .copied()
             .filter(|i| snapshot.procs[*i as usize].group == kind)
@@ -289,10 +298,22 @@ pub fn build_rows(view: &View<'_>) -> Vec<Row> {
             continue;
         }
 
-        let mut roots = build_tree(&members, snapshot);
-        sort_indices(&mut roots, snapshot, view.sort, view.desc);
-        for idx in roots {
-            push_tree(idx, &members, snapshot, view, 0, &mut rows);
+        if view.group_hierarchy {
+            let mut roots = build_tree(&members, snapshot);
+            sort_indices(&mut roots, snapshot, view.sort, view.desc);
+            for idx in roots {
+                push_tree(idx, &members, snapshot, view, 0, &mut rows);
+            }
+        } else {
+            sort_indices(&mut members, snapshot, view.sort, view.desc);
+            for idx in members {
+                rows.push(Row::Proc {
+                    idx,
+                    depth: 0,
+                    children: 0,
+                    expanded: false,
+                });
+            }
         }
     }
 

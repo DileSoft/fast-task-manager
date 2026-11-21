@@ -10,7 +10,11 @@ pub struct Settings {
     pub columns: Vec<String>,
     pub sort: String,
     pub sort_desc: bool,
+    /// Группы «Приложения / Фоновые / Процессы Windows». По умолчанию выключено.
     pub group_by_type: bool,
+    /// Дерево родитель-потомок. По умолчанию включено.
+    #[serde(default = "hierarchy_default")]
+    pub group_hierarchy: bool,
     pub interval_ms: u64,
     pub paused: bool,
     /// `None` — следовать теме Windows, иначе явный выбор пользователя.
@@ -38,6 +42,7 @@ impl Default for Settings {
             sort: "cpu".to_string(),
             sort_desc: true,
             group_by_type: false,
+            group_hierarchy: true,
             interval_ms: 1000,
             paused: false,
             dark: None,
@@ -49,6 +54,10 @@ impl Default for Settings {
             window_y: None,
         }
     }
+}
+
+fn hierarchy_default() -> bool {
+    true
 }
 
 impl Settings {
