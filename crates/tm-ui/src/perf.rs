@@ -58,20 +58,6 @@ impl Resource {
     }
 }
 
-pub fn available(snapshot: &Snapshot) -> Vec<Resource> {
-    let mut list = vec![Resource::Cpu, Resource::Memory];
-    for i in 0..snapshot.disks.len() {
-        list.push(Resource::Disk(i));
-    }
-    for i in 0..snapshot.nets.len() {
-        list.push(Resource::Network(i));
-    }
-    if snapshot.capabilities.gpu_available || snapshot.system.gpu_dedicated > 0 {
-        list.push(Resource::Gpu);
-    }
-    list
-}
-
 fn label(snapshot: &Snapshot, res: Resource) -> String {
     match res {
         Resource::Cpu => "ЦП".to_string(),
@@ -79,7 +65,13 @@ fn label(snapshot: &Snapshot, res: Resource) -> String {
         Resource::Disk(i) => snapshot
             .disks
             .get(i)
-            .map(|d| d.name.clone())
+            .map(|d| {
+                if d.volumes.is_empty() {
+                    d.name.clone()
+                } else {
+                    format!("{} ({})", d.name, d.volumes)
+                }
+            })
             .unwrap_or_else(|| "Диск".to_string()),
         Resource::Network(i) => snapshot
             .nets
@@ -88,6 +80,109 @@ fn label(snapshot: &Snapshot, res: Resource) -> String {
             .unwrap_or_else(|| "Сеть".to_string()),
         Resource::Gpu => "ГП 0".to_string(),
     }
+}
+
+/// Раздел левого меню: заголовок, подпись с названием оборудования и ресурсы.
+struct Section {
+    title: &'static str,
+    detail: String,
+    items: Vec<Resource>,
+}
+
+fn plural(n: usize, one: &str, few: &str, many: &str) -> String {
+    let tail = n % 100;
+    let form = if tail >= 11 && tail <= 14 {
+        many
+    } else {
+        match n % 10 {
+            1 => one,
+            2..=4 => few,
+            _ => many,
+        }
+    };
+    format!("{n} {form}")
+}
+
+fn sections(snapshot: &Snapshot) -> Vec<Section> {
+    let s = &snapshot.system;
+    let mut out = Vec::with_capacity(5);
+
+    out.push(Section {
+        title: "ЦП",
+        detail: s.cpu_name.clone(),
+        items: vec![Resource::Cpu],
+    });
+    out.push(Section {
+        title: "Память",
+        detail: format!("{} ОЗУ", fmt_bytes(s.mem_total)),
+        items: vec![Resource::Memory],
+    });
+
+    let disks: Vec<Resource> = (0..snapshot.disks.len()).map(Resource::Disk).collect();
+    if !disks.is_empty() {
+        let volumes: Vec<&str> = snapshot
+            .disks
+            .iter()
+            .map(|d| d.volumes.trim())
+            .filter(|v| !v.is_empty())
+            .collect();
+        let detail = if volumes.is_empty() {
+            plural(
+                snapshot.disks.len(),
+                "физический диск",
+                "физических диска",
+                "физических дисков",
+            )
+        } else {
+            format!(
+                "{}  ·  тома {}",
+                plural(snapshot.disks.len(), "диск", "диска", "дисков"),
+                volumes.join(", ")
+            )
+        };
+        out.push(Section {
+            title: "Диски",
+            detail,
+            items: disks,
+        });
+    }
+
+    let nets: Vec<Resource> = (0..snapshot.nets.len()).map(Resource::Network).collect();
+    if !nets.is_empty() {
+        let hardware = snapshot
+            .nets
+            .iter()
+            .map(|n| n.description.trim())
+            .find(|d| !d.is_empty())
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| plural(snapshot.nets.len(), "адаптер", "адаптера", "адаптеров"));
+        let extra = snapshot.nets.len().saturating_sub(1);
+        let detail = if extra > 0 {
+            format!("{hardware}  ·  +{extra}")
+        } else {
+            hardware
+        };
+        out.push(Section {
+            title: "Сеть",
+            detail,
+            items: nets,
+        });
+    }
+
+    if snapshot.capabilities.gpu_available || snapshot.system.gpu_dedicated > 0 {
+        let detail = if s.gpu_name.trim().is_empty() {
+            "Графический процессор".to_string()
+        } else {
+            s.gpu_name.clone()
+        };
+        out.push(Section {
+            title: "Графический процессор",
+            detail,
+            items: vec![Resource::Gpu],
+        });
+    }
+
+    out
 }
 
 fn value(snapshot: &Snapshot, res: Resource) -> String {
@@ -141,14 +236,18 @@ fn series(snapshot: &Snapshot, res: Resource) -> Vec<f32> {
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let snapshot = app.snapshot.clone();
     let palette = app.palette;
-    let resources = available(&snapshot);
+    let sections = sections(&snapshot);
+    let resources: Vec<Resource> = sections
+        .iter()
+        .flat_map(|s| s.items.iter().copied())
+        .collect();
     if !resources.contains(&app.perf_resource) {
         app.perf_resource = resources.first().copied().unwrap_or(Resource::Cpu);
     }
 
     let height = ui.available_height();
     let total_width = ui.available_width();
-    let left_width = 238.0;
+    let left_width = 262.0;
     let right_width = (total_width - left_width - 40.0).max(300.0);
 
     ui.horizontal_top(|ui| {
@@ -156,23 +255,33 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             egui::vec2(left_width, height),
             Layout::top_down(Align::Min),
             |ui| {
-                ui.add_space(4.0);
-                for res in &resources {
-                    let selected = app.perf_resource == *res;
-                    let data = series(&snapshot, *res);
-                    if left_item(
-                        ui,
-                        &palette,
-                        &label(&snapshot, *res),
-                        value(&snapshot, *res),
-                        &data,
-                        res.color(&palette),
-                        selected,
-                    ) {
-                        app.perf_resource = *res;
-                        app.settings_dirty = true;
-                    }
-                }
+                egui::ScrollArea::vertical()
+                    .id_salt("perf-resources")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_width(left_width - 10.0);
+                        ui.add_space(2.0);
+                        for (index, section) in sections.iter().enumerate() {
+                            left_header(ui, &palette, section.title, &section.detail, index > 0);
+                            for res in &section.items {
+                                let selected = app.perf_resource == *res;
+                                let data = series(&snapshot, *res);
+                                if left_item(
+                                    ui,
+                                    &palette,
+                                    &label(&snapshot, *res),
+                                    value(&snapshot, *res),
+                                    &data,
+                                    res.color(&palette),
+                                    selected,
+                                ) {
+                                    app.perf_resource = *res;
+                                    app.settings_dirty = true;
+                                }
+                            }
+                        }
+                        ui.add_space(6.0);
+                    });
             },
         );
         ui.add_space(4.0);
@@ -193,6 +302,55 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             },
         );
     });
+}
+
+/// Подзаголовок раздела: категория и название оборудования под ней.
+fn left_header(ui: &mut egui::Ui, palette: &Palette, title: &str, detail: &str, separator: bool) {
+    let width = ui.available_width();
+    let height = if detail.is_empty() { 26.0 } else { 40.0 };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+    let painter = ui.painter();
+
+    if separator {
+        painter.line_segment(
+            [
+                Pos2::new(rect.left() + 10.0, rect.top()),
+                Pos2::new(rect.right() - 6.0, rect.top()),
+            ],
+            egui::Stroke::new(1.0_f32, palette.border),
+        );
+    }
+
+    let clip = egui::Rect::from_min_max(
+        Pos2::new(rect.left() + 8.0, rect.top()),
+        Pos2::new(rect.right() - 6.0, rect.bottom()),
+    );
+    theme_text(
+        ui,
+        Pos2::new(rect.left() + 10.0, rect.top() + 11.0),
+        Align2::LEFT_CENTER,
+        title.to_uppercase(),
+        bold(11.0),
+        palette.text_dim,
+    );
+    if !detail.is_empty() {
+        crate::theme::text_clipped(
+            ui,
+            clip,
+            Pos2::new(rect.left() + 10.0, rect.top() + 27.0),
+            Align2::LEFT_CENTER,
+            detail,
+            font(11.5),
+            palette.text,
+        );
+    }
+
+    let tip = if detail.is_empty() {
+        title.to_string()
+    } else {
+        format!("{title} · {detail}")
+    };
+    resp.on_hover_text(tip);
 }
 
 fn left_item(
