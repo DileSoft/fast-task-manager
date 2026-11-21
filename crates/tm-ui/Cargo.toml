@@ -9,7 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 tm-core = { path = "../tm-core" }
-once_cell = "1"
 
 [dependencies.windows-sys]
 version = "0.61"

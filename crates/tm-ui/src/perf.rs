@@ -495,9 +495,14 @@ fn core_grid(ui: &mut egui::Ui, palette: &Palette, snapshot: &Snapshot, graph_he
 
     for chunk_start in (0..cores).step_by(columns) {
         ui.horizontal(|ui| {
-            for i in chunk_start..(chunk_start + columns).min(cores) {
+            for (i, hist) in snapshot
+                .core_history
+                .iter()
+                .enumerate()
+                .skip(chunk_start)
+                .take(columns)
+            {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(cell_w, cell_h), Sense::hover());
-                let hist = &snapshot.core_history[i];
                 let last = hist.last().copied().unwrap_or(0.0);
                 ui.painter().with_clip_rect(rect).text(
                     Pos2::new(rect.left() + 3.0, rect.top() + 4.0),

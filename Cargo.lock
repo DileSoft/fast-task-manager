@@ -1957,7 +1957,6 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "ntapi",
- "once_cell",
  "windows-sys 0.61.2",
 ]
 
@@ -1966,7 +1965,6 @@ name = "tm-ui"
 version = "0.1.0"
 dependencies = [
  "eframe",
- "once_cell",
  "tm-core",
  "windows-sys 0.61.2",
 ]
