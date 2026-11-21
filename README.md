@@ -1,5 +1,7 @@
 # Диспетчер задач
 
+[![build](https://github.com/DileSoft/fast-task-manager/actions/workflows/build.yml/badge.svg)](https://github.com/DileSoft/fast-task-manager/actions/workflows/build.yml)
+
 Быстрый аналог первых двух вкладок диспетчера задач Windows 10 — «Процессы» и
 «Производительность». Написан на Rust, без WMI и без .NET.
 
@@ -44,6 +46,9 @@ cargo build --release
 ```
 
 Для отладки удобен `cargo run -p tm-ui`.
+
+GitHub Actions на каждый push в `main` проверяет `fmt` и `clippy`, собирает
+release и выкладывает `tm.exe` артефактом `tm-windows-x64` во вкладке Actions.
 
 ### Права администратора
 
