@@ -524,7 +524,22 @@ impl App {
         }
 
         let cols = table::layout(ui.available_width() - 10.0, &self.columns);
-        if let Some(col) = table::header(ui, &self.palette, &cols, self.sort, self.sort_desc) {
+        let system = &self.snapshot.system;
+        let cpu_pct = system.cpu_total;
+        let mem_pct = if system.mem_total > 0 {
+            system.mem_used as f32 / system.mem_total as f32 * 100.0
+        } else {
+            0.0
+        };
+        if let Some(col) = table::header(
+            ui,
+            &self.palette,
+            &cols,
+            self.sort,
+            self.sort_desc,
+            cpu_pct,
+            mem_pct,
+        ) {
             if self.sort == col {
                 self.sort_desc = !self.sort_desc;
             } else {

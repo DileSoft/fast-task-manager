@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Ui};
-use tm_core::{fmt_percent, fmt_rate, GroupKind, ProcInfo, ProcStatus, Snapshot};
+use tm_core::{fmt_bytes, fmt_percent, fmt_rate, GroupKind, ProcInfo, ProcStatus, Snapshot};
 
 use crate::icons::IconCache;
 use crate::theme::{self, bold, font, Palette};
@@ -167,6 +167,39 @@ pub fn layout(available: f32, cols: &[Col]) -> Vec<(Col, f32)> {
         .collect()
 }
 
+/// Суммарные ресурсы процесса вместе со всеми потомками.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Sums {
+    pub cpu: f32,
+    pub mem: u64,
+    pub disk: f64,
+    pub net: f64,
+    pub gpu: f32,
+    pub threads: u32,
+}
+
+impl Sums {
+    fn of(proc: &ProcInfo) -> Self {
+        Self {
+            cpu: proc.cpu,
+            mem: proc.working_set,
+            disk: proc.disk_read_bps + proc.disk_write_bps,
+            net: proc.net_recv_bps + proc.net_send_bps,
+            gpu: proc.gpu,
+            threads: proc.threads,
+        }
+    }
+
+    fn add(&mut self, other: Self) {
+        self.cpu += other.cpu;
+        self.mem += other.mem;
+        self.disk += other.disk;
+        self.net += other.net;
+        self.gpu += other.gpu;
+        self.threads += other.threads;
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Row {
     Group {
@@ -185,6 +218,8 @@ pub enum Row {
         depth: u8,
         children: u32,
         expanded: bool,
+        /// Сумма по поддереву; `None` — у процесса нет детей.
+        sums: Option<Sums>,
     },
 }
 
@@ -243,6 +278,7 @@ pub fn build_rows(view: &View<'_>) -> Vec<Row> {
                 depth: 0,
                 children: 0,
                 expanded: false,
+                sums: None,
             })
             .collect();
     }
@@ -261,6 +297,7 @@ pub fn build_rows(view: &View<'_>) -> Vec<Row> {
                     depth: 0,
                     children: 0,
                     expanded: false,
+                    sums: None,
                 })
                 .collect();
         }
@@ -343,6 +380,7 @@ pub fn build_rows(view: &View<'_>) -> Vec<Row> {
                     depth: 0,
                     children: 0,
                     expanded: false,
+                    sums: None,
                 });
             }
         }
@@ -394,6 +432,7 @@ fn push_tree(
             depth,
             children: 0,
             expanded: false,
+            sums: None,
         });
         return;
     }
@@ -409,6 +448,7 @@ fn push_tree(
         depth,
         children: children.len() as u32,
         expanded,
+        sums: Some(subtree_sums(idx, indices, snapshot)),
     });
     if expanded {
         for child in children {
@@ -422,6 +462,18 @@ fn push_tree(
             );
         }
     }
+}
+
+/// Суммарные ресурсы процесса и всех его потомков (включая свёрнутых).
+fn subtree_sums(idx: u32, indices: &[u32], snapshot: &Snapshot) -> Sums {
+    let proc = &snapshot.procs[idx as usize];
+    let mut total = Sums::of(proc);
+    for child in children_of(proc.pid, indices, snapshot) {
+        total.add(subtree_sums(child, indices, snapshot));
+    }
+    total.cpu = total.cpu.clamp(0.0, 100.0);
+    total.gpu = total.gpu.clamp(0.0, 100.0);
+    total
 }
 
 fn sort_indices(indices: &mut [u32], snapshot: &Snapshot, col: Col, desc: bool) {
@@ -509,6 +561,8 @@ pub fn header(
     cols: &[(Col, f32)],
     sort: Col,
     desc: bool,
+    cpu_pct: f32,
+    mem_pct: f32,
 ) -> Option<Col> {
     let width = cols.iter().map(|(_, w)| *w).sum::<f32>() + 8.0;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, theme::header_h()), Sense::hover());
@@ -546,7 +600,37 @@ pub fn header(
         } else {
             palette.text
         };
-        theme::text_clipped(ui, cell, pos, align, col.label(), font(12.5), color);
+        let total = match col {
+            Col::Cpu => Some(fmt_percent(cpu_pct)),
+            Col::Memory => Some(fmt_percent(mem_pct)),
+            _ => None,
+        };
+        match total {
+            Some(total) => {
+                theme::text_clipped(
+                    ui,
+                    cell,
+                    cell.left_center() + egui::vec2(8.0, 0.0),
+                    Align2::LEFT_CENTER,
+                    col.label(),
+                    font(12.0),
+                    color,
+                );
+                let right = cell.right() - if *col == sort { 13.0 } else { 8.0 };
+                theme::text_clipped(
+                    ui,
+                    cell,
+                    Pos2::new(right, cell.center().y),
+                    Align2::RIGHT_CENTER,
+                    total,
+                    font(12.0),
+                    palette.text_dim,
+                );
+            }
+            None => {
+                theme::text_clipped(ui, cell, pos, align, col.label(), font(12.5), color);
+            }
+        }
         if *col == sort {
             let cx = if col.numeric() {
                 cell.right() - 3.0
@@ -651,8 +735,6 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
             count,
             expanded,
         } => {
-            let total_mem = ctx.snapshot.system.mem_total.max(1) as f64;
-            let mem_pct = (mem as f64 / total_mem * 100.0).clamp(0.0, 100.0) as f32;
             let name_rect =
                 Rect::from_min_size(rect.min, egui::vec2(ctx.cols[0].1, theme::row_h()));
             draw_chevron(
@@ -677,7 +759,7 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                     Rect::from_min_size(Pos2::new(x, rect.top()), egui::vec2(*w, theme::row_h()));
                 let text = match col {
                     Col::Cpu => fmt_percent(cpu),
-                    Col::Memory => fmt_percent(mem_pct),
+                    Col::Memory => fmt_bytes(mem),
                     Col::Disk => fmt_rate(disk),
                     Col::Network => fmt_rate(net),
                     Col::Gpu => {
@@ -712,8 +794,21 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
             depth,
             children,
             expanded,
+            sums,
         } => {
             let proc = &ctx.snapshot.procs[idx as usize];
+            // У родительской строки дерева показываем сумму по поддереву.
+            let (cpu, mem, disk, net, gpu, threads) = match sums {
+                Some(s) => (s.cpu, s.mem, s.disk, s.net, s.gpu, s.threads),
+                None => (
+                    proc.cpu,
+                    proc.working_set,
+                    proc.disk_read_bps + proc.disk_write_bps,
+                    proc.net_recv_bps + proc.net_send_bps,
+                    proc.gpu,
+                    proc.threads,
+                ),
+            };
             let mut x = rect.left() + 2.0;
 
             // Стрелка дерева.
@@ -779,7 +874,7 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                         );
                     }
                     Col::Cpu => {
-                        let color = if proc.cpu >= 1.0 {
+                        let color = if cpu >= 1.0 {
                             palette.text
                         } else {
                             palette.text_dim
@@ -789,56 +884,52 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                             cell,
                             Pos2::new(cell.right() - 8.0, cell.center().y),
                             Align2::RIGHT_CENTER,
-                            fmt_percent(proc.cpu),
+                            fmt_percent(cpu),
                             font(13.0),
                             color,
                         );
                     }
                     Col::Memory => {
-                        let total_mem = ctx.snapshot.system.mem_total.max(1) as f64;
-                        let pct = (proc.working_set as f64 / total_mem * 100.0) as f32;
                         theme::text_clipped(
                             ui,
                             cell,
                             Pos2::new(cell.right() - 8.0, cell.center().y),
                             Align2::RIGHT_CENTER,
-                            fmt_percent(pct),
+                            fmt_bytes(mem),
                             font(13.0),
                             palette.text,
                         );
                     }
                     Col::Disk => {
-                        let v = proc.disk_read_bps + proc.disk_write_bps;
                         theme::text_clipped(
                             ui,
                             cell,
                             Pos2::new(cell.right() - 8.0, cell.center().y),
                             Align2::RIGHT_CENTER,
-                            fmt_rate(v),
+                            fmt_rate(disk),
                             font(13.0),
                             palette.text,
                         );
                     }
                     Col::Network => {
-                        let v = proc.net_recv_bps + proc.net_send_bps;
                         theme::text_clipped(
                             ui,
                             cell,
                             Pos2::new(cell.right() - 8.0, cell.center().y),
                             Align2::RIGHT_CENTER,
-                            fmt_rate(v),
+                            fmt_rate(net),
                             font(13.0),
                             palette.text,
                         );
                     }
                     Col::Gpu => {
-                        if proc.gpu > 0.0 {
+                        if gpu > 0.0 {
                             theme::text_clipped(
                                 ui,
                                 cell,
                                 Pos2::new(cell.right() - 8.0, cell.center().y),
                                 Align2::RIGHT_CENTER,
-                                fmt_percent(proc.gpu),
+                                fmt_percent(gpu),
                                 font(13.0),
                                 palette.text,
                             );
@@ -861,7 +952,7 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                             cell,
                             Pos2::new(cell.right() - 8.0, cell.center().y),
                             Align2::RIGHT_CENTER,
-                            proc.threads.to_string(),
+                            threads.to_string(),
                             font(12.5),
                             palette.text_dim,
                         );
