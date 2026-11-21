@@ -20,8 +20,9 @@ use arc_swap::ArcSwap;
 use windows_sys::core::GUID;
 use windows_sys::Win32::System::Diagnostics::Etw::{
     CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW,
-    EVENT_RECORD, CONTROLTRACE_HANDLE, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES,
-    PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME, PROCESSTRACE_HANDLE,
+    CONTROLTRACE_HANDLE, EVENT_RECORD, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW,
+    EVENT_TRACE_PROPERTIES, PROCESSTRACE_HANDLE, PROCESS_TRACE_MODE_EVENT_RECORD,
+    PROCESS_TRACE_MODE_REAL_TIME,
 };
 
 use crate::sys::wide;
@@ -118,7 +119,7 @@ fn accumulate(sink: &Sink, pid: u32, add: IoCounters, timestamp: i64) {
         c.set(v);
         v
     });
-    if timestamp - last > 5_000_000 || count % 4096 == 0 {
+    if timestamp - last > 5_000_000 || count.is_multiple_of(4096) {
         LAST_FLUSH.with(|f| f.set(timestamp));
         flush_pending(sink);
     }
@@ -187,14 +188,7 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
         let map = sink.threads.load();
         let pid = thread_id
             .and_then(|t| map.get(&t).copied())
-            .or_else(|| {
-                // Фолбэк: заголовок события иногда содержит нужный процесс.
-                if header.ProcessId > 4 {
-                    Some(header.ProcessId)
-                } else {
-                    None
-                }
-            });
+            .or((header.ProcessId > 4).then_some(header.ProcessId));
         let Some(pid) = pid else { return };
         let mut add = IoCounters::default();
         match id {
@@ -215,7 +209,7 @@ fn session_properties(name: &str) -> Vec<u64> {
     let props_size = std::mem::size_of::<EVENT_TRACE_PROPERTIES>();
     let name_w = wide(name);
     let total = props_size + name_w.len() * 2;
-    let words = (total + 7) / 8 + 1;
+    let words = total.div_ceil(8) + 1;
     let mut buf = vec![0u64; words];
     unsafe {
         let props = buf.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES;
@@ -363,9 +357,7 @@ fn run_session(
     if rc != 0 {
         set_error(
             &status,
-            format!(
-                "Не удалось запустить ETW (код {rc}). Нужны права администратора."
-            ),
+            format!("Не удалось запустить ETW (код {rc}). Нужны права администратора."),
         );
         return;
     }
@@ -375,8 +367,8 @@ fn run_session(
             session_handle,
             &NETWORK_PROVIDER,
             EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-            5,          // verbose
-            0x30,       // IPV4 | IPV6
+            5,    // verbose
+            0x30, // IPV4 | IPV6
             0,
             0,
             std::ptr::null(),
@@ -426,7 +418,8 @@ fn run_session(
     let sink_ptr = Arc::as_ptr(&sink) as *mut c_void;
     let mut logfile: EVENT_TRACE_LOGFILEW = unsafe { std::mem::zeroed() };
     logfile.LoggerName = name.as_ptr() as *mut u16;
-    logfile.Anonymous1.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
+    logfile.Anonymous1.ProcessTraceMode =
+        PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
     logfile.Anonymous2.EventRecordCallback = Some(on_event);
     logfile.Context = sink_ptr;
 

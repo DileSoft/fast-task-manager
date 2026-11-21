@@ -27,7 +27,8 @@ pub fn query() -> Vec<AdapterSample> {
     let mut out = Vec::new();
     unsafe {
         let num = (*table).NumEntries as usize;
-        let rows = std::ptr::addr_of!((*table).Table) as *const windows_sys::Win32::NetworkManagement::IpHelper::MIB_IF_ROW2;
+        let rows = std::ptr::addr_of!((*table).Table)
+            as *const windows_sys::Win32::NetworkManagement::IpHelper::MIB_IF_ROW2;
         for i in 0..num {
             let row = &*rows.add(i);
             if row.Type == IF_TYPE_SOFTWARE_LOOPBACK || row.Type == IF_TYPE_TUNNEL {

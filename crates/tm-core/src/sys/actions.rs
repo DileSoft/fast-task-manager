@@ -3,9 +3,7 @@
 use std::ffi::c_void;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HWND};
-use windows_sys::Win32::System::Threading::{
-    OpenProcess, TerminateProcess, PROCESS_TERMINATE,
-};
+use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 

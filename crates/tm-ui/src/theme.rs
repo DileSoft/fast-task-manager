@@ -142,9 +142,17 @@ pub fn install(ctx: &egui::Context, dark: bool) -> Palette {
         .insert(0, "segoe".to_owned());
     ctx.set_fonts(fonts);
 
-    let p = if dark { Palette::dark() } else { Palette::light() };
+    let p = if dark {
+        Palette::dark()
+    } else {
+        Palette::light()
+    };
     let mut style = (*ctx.style()).clone();
-    style.visuals = if dark { Visuals::dark() } else { Visuals::light() };
+    style.visuals = if dark {
+        Visuals::dark()
+    } else {
+        Visuals::light()
+    };
     style.visuals.panel_fill = p.bg;
     style.visuals.window_fill = p.panel;
     style.visuals.extreme_bg_color = p.input;
@@ -168,18 +176,10 @@ pub fn install(ctx: &egui::Context, dark: bool) -> Palette {
     style.spacing.button_padding = egui::vec2(9.0, 3.0);
     style.spacing.menu_margin = egui::Margin::same(4);
 
-    style
-        .text_styles
-        .insert(TextStyle::Body, font(FONT_SIZE));
-    style
-        .text_styles
-        .insert(TextStyle::Button, font(FONT_SIZE));
-    style
-        .text_styles
-        .insert(TextStyle::Small, font(12.0));
-    style
-        .text_styles
-        .insert(TextStyle::Heading, bold(18.0));
+    style.text_styles.insert(TextStyle::Body, font(FONT_SIZE));
+    style.text_styles.insert(TextStyle::Button, font(FONT_SIZE));
+    style.text_styles.insert(TextStyle::Small, font(12.0));
+    style.text_styles.insert(TextStyle::Heading, bold(18.0));
     style
         .text_styles
         .insert(TextStyle::Monospace, font(FONT_SIZE));

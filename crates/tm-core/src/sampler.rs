@@ -200,10 +200,7 @@ impl Collector {
 
         // 1. Процессы (один системный вызов).
         self.raw_buf.clear();
-        let procs_ok = self
-            .proc_query
-            .query(&mut self.raw_buf, etw_active)
-            .is_ok();
+        let procs_ok = self.proc_query.query(&mut self.raw_buf, etw_active).is_ok();
         lap("процессы");
 
         // 2. Карта потоков для ETW-диска.
@@ -283,7 +280,10 @@ impl Collector {
         let t_mem = Instant::now();
         let mi = mem::collect();
         if profile {
-            eprintln!("    mem.collect: {:.1} мс", t_mem.elapsed().as_secs_f64() * 1000.0);
+            eprintln!(
+                "    mem.collect: {:.1} мс",
+                t_mem.elapsed().as_secs_f64() * 1000.0
+            );
         }
         let mem_total = mi.total;
         let mut mem_avail = mi.avail;
@@ -310,7 +310,10 @@ impl Collector {
             let t0 = Instant::now();
             c.q.collect();
             if profile {
-                eprintln!("    pdh.collect: {:.1} мс", t0.elapsed().as_secs_f64() * 1000.0);
+                eprintln!(
+                    "    pdh.collect: {:.1} мс",
+                    t0.elapsed().as_secs_f64() * 1000.0
+                );
             }
             let t1 = Instant::now();
 
@@ -359,7 +362,10 @@ impl Collector {
 
             // GPU-счётчики тяжёлые (сотни экземпляров) — раз в 3 тика.
             if profile {
-                eprintln!("    pdh.values: {:.1} мс", t1.elapsed().as_secs_f64() * 1000.0);
+                eprintln!(
+                    "    pdh.values: {:.1} мс",
+                    t1.elapsed().as_secs_f64() * 1000.0
+                );
             }
             let t2 = Instant::now();
             let refresh_gpu = self.seq % 3 == 1 || self.gpu_engine_cache.is_empty();
@@ -448,12 +454,9 @@ impl Collector {
                     None => {
                         let is_app = windows.contains_key(&raw.pid);
                         if identity_budget > 0 || is_app {
-                            if identity_budget > 0 {
-                                identity_budget -= 1;
-                            }
+                            identity_budget = identity_budget.saturating_sub(1);
                             let t_ident = Instant::now();
-                            let resolved =
-                                CachedIdentity::from_raw(identity::resolve(raw.pid));
+                            let resolved = CachedIdentity::from_raw(identity::resolve(raw.pid));
                             ident_ms += t_ident.elapsed().as_secs_f64() * 1000.0;
                             ident_count += 1;
                             self.identities.insert(key, resolved.clone());
@@ -465,7 +468,10 @@ impl Collector {
                     }
                 };
 
-                let prev = self.prev_times.get(&raw.pid).filter(|p| p.create_time == raw.create_time);
+                let prev = self
+                    .prev_times
+                    .get(&raw.pid)
+                    .filter(|p| p.create_time == raw.create_time);
                 let cpu = match prev {
                     Some(p) => {
                         let delta = (raw.kernel_time - p.kernel) + (raw.user_time - p.user);
@@ -608,9 +614,8 @@ impl Collector {
         }
 
         // 8. Системные показатели.
-        let uptime_secs = unsafe {
-            windows_sys::Win32::System::SystemInformation::GetTickCount64() / 1000
-        };
+        let uptime_secs =
+            unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() / 1000 };
         if self.disk_space_tick == 0 || self.seq - self.disk_space_tick >= 10 {
             self.disk_space_cache = mem::disk_space();
             self.disk_space_tick = self.seq;
@@ -725,7 +730,9 @@ static ADMIN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 pub fn is_admin() -> bool {
     *ADMIN.get_or_init(|| {
         use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+        };
         use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
         unsafe {
             let mut token = std::ptr::null_mut();

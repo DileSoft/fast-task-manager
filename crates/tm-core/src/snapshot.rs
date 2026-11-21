@@ -289,10 +289,5 @@ pub fn fmt_filetime_local(ft: i64) -> String {
 /// Накопленное время ЦП (100 нс) в формате Ч:ММ:СС.
 pub fn fmt_cpu_time(ft: i64) -> String {
     let secs = (ft.max(0) / 10_000_000) as u64;
-    format!(
-        "{}:{:02}:{:02}",
-        secs / 3600,
-        (secs % 3600) / 60,
-        secs % 60
-    )
+    format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
 }

@@ -101,9 +101,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.set_max_width(right_width - 18.0);
-                        right_panel(
-                            app, ui, &snapshot, &cpu, &mem, &disk, &net_r, &net_s, &gpu,
-                        );
+                        right_panel(app, ui, &snapshot, &cpu, &mem, &disk, &net_r, &net_s, &gpu);
                     });
             },
         );
@@ -241,16 +239,8 @@ fn right_panel(
             fmt_bytes(s.disk_free),
             fmt_bytes(s.disk_total)
         ),
-        Resource::Network => format!(
-            "{}  ·  канал {}",
-            s.net_name,
-            fmt_speed(s.net_link_bps)
-        ),
-        Resource::Gpu => format!(
-            "{}  ·  выделено {}",
-            s.gpu_name,
-            fmt_bytes(s.gpu_dedicated)
-        ),
+        Resource::Network => format!("{}  ·  канал {}", s.net_name, fmt_speed(s.net_link_bps)),
+        Resource::Gpu => format!("{}  ·  выделено {}", s.gpu_name, fmt_bytes(s.gpu_dedicated)),
     };
 
     ui.horizontal(|ui| {
@@ -268,7 +258,11 @@ fn right_panel(
                 }),
                 Resource::Disk => fmt_percent(s.disk_active),
                 Resource::Network => {
-                    format!("↓ {}  ↑ {}", fmt_rate(s.net_recv_bps), fmt_rate(s.net_send_bps))
+                    format!(
+                        "↓ {}  ↑ {}",
+                        fmt_rate(s.net_recv_bps),
+                        fmt_rate(s.net_send_bps)
+                    )
                 }
                 Resource::Gpu => fmt_percent(s.gpu),
             };
@@ -298,18 +292,12 @@ fn right_panel(
                 &[
                     ("Использование", fmt_percent(s.cpu_total)),
                     ("Скорость", fmt_mhz(s.cpu_speed_mhz.max(s.cpu_base_mhz))),
-                    (
-                        "Ядра",
-                        format!("{} логических", s.cores_logical),
-                    ),
+                    ("Ядра", format!("{} логических", s.cores_logical)),
                     ("Процессы", s.processes.to_string()),
                     ("Потоки", s.threads.to_string()),
                     ("Дескрипторы", s.handles.to_string()),
                     ("Время работы", fmt_uptime(s.uptime_secs)),
-                    (
-                        "В режиме ядра",
-                        format!("{:.1}%", s.cpu_kernel),
-                    ),
+                    ("В режиме ядра", format!("{:.1}%", s.cpu_kernel)),
                 ],
             );
             ui.add_space(8.0);
@@ -338,9 +326,20 @@ fn right_panel(
                     ("Свободно", fmt_bytes(s.mem_free)),
                     (
                         "Выделено",
-                        format!("{} / {}", fmt_bytes(s.mem_committed), fmt_bytes(s.mem_commit_limit)),
+                        format!(
+                            "{} / {}",
+                            fmt_bytes(s.mem_committed),
+                            fmt_bytes(s.mem_commit_limit)
+                        ),
                     ),
-                    ("Пулы", format!("{} / {}", fmt_bytes(s.mem_paged_pool), fmt_bytes(s.mem_nonpaged_pool))),
+                    (
+                        "Пулы",
+                        format!(
+                            "{} / {}",
+                            fmt_bytes(s.mem_paged_pool),
+                            fmt_bytes(s.mem_nonpaged_pool)
+                        ),
+                    ),
                 ],
             );
         }
@@ -380,8 +379,16 @@ fn right_panel(
             );
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                legend_dot(ui, palette.net, &format!("Приём {}", fmt_rate(s.net_recv_bps)));
-                legend_dot(ui, palette.warn, &format!("Отправка {}", fmt_rate(s.net_send_bps)));
+                legend_dot(
+                    ui,
+                    palette.net,
+                    &format!("Приём {}", fmt_rate(s.net_recv_bps)),
+                );
+                legend_dot(
+                    ui,
+                    palette.warn,
+                    &format!("Отправка {}", fmt_rate(s.net_send_bps)),
+                );
             });
             ui.add_space(8.0);
             stat_row(
@@ -423,7 +430,8 @@ fn right_panel(
 fn stat_row(ui: &mut egui::Ui, palette: &Palette, items: &[(&str, String)]) {
     let card = 136.0;
     let gap = 6.0;
-    let per_row = (((ui.available_width() + gap) / (card + 22.0 + gap)).floor() as usize).clamp(1, 4);
+    let per_row =
+        (((ui.available_width() + gap) / (card + 22.0 + gap)).floor() as usize).clamp(1, 4);
     for chunk in items.chunks(per_row) {
         ui.horizontal(|ui| {
             for (label, value) in chunk {
@@ -447,10 +455,7 @@ fn composition(ui: &mut egui::Ui, palette: &Palette, s: &tm_core::SystemStats) {
         (s.mem_cached as f32 / total as f32 * 100.0, palette.mem),
         (s.mem_free as f32 / total as f32 * 100.0, palette.border),
     ];
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 22.0),
-        Sense::hover(),
-    );
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::hover());
     fill_bg(ui, rect, palette);
     let inner = rect.shrink(3.0);
     graph::stacked_bar(ui, inner, &parts);
@@ -460,7 +465,11 @@ fn composition(ui: &mut egui::Ui, palette: &Palette, s: &tm_core::SystemStats) {
         legend_dot(ui, palette.mem, "Кэш");
         legend_dot(ui, palette.border, "Свободно");
         legend_dot(ui, palette.warn, "Изменённые");
-        dim_label(ui, palette, &format!("изменённые {}", fmt_bytes(s.mem_modified)));
+        dim_label(
+            ui,
+            palette,
+            &format!("изменённые {}", fmt_bytes(s.mem_modified)),
+        );
     });
 }
 
@@ -477,8 +486,9 @@ fn core_grid(ui: &mut egui::Ui, palette: &Palette, snapshot: &Snapshot, graph_he
     let columns = 2usize;
     let gap = 6.0;
     let cell_w = (ui.available_width() - gap * (columns as f32 - 1.0)) / columns as f32;
-    let rows = (cores + columns - 1) / columns;
-    let cell_h = ((remaining.min(140.0) - gap * (rows as f32 - 1.0)) / rows as f32).clamp(38.0, 52.0);
+    let rows = cores.div_ceil(columns);
+    let cell_h =
+        ((remaining.min(140.0) - gap * (rows as f32 - 1.0)) / rows as f32).clamp(38.0, 52.0);
     ui.add_space(1.0);
     ui.separator();
     ui.add_space(4.0);

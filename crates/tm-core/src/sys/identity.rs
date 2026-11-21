@@ -76,12 +76,13 @@ fn file_description(path: &str) -> Option<String> {
         return None;
     }
     let mut buf = vec![0u8; size as usize];
-    if unsafe { GetFileVersionInfoW(wpath.as_ptr(), 0, size, buf.as_mut_ptr() as *mut c_void) } == 0 {
+    if unsafe { GetFileVersionInfoW(wpath.as_ptr(), 0, size, buf.as_mut_ptr() as *mut c_void) } == 0
+    {
         return None;
     }
 
     let mut desc = query_version_string(&buf, "FileDescription");
-    if desc.as_deref().map_or(true, |s| s.trim().is_empty()) {
+    if desc.as_deref().is_none_or(|s| s.trim().is_empty()) {
         desc = query_version_string(&buf, "ProductName");
     }
     desc.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
@@ -125,7 +126,12 @@ fn query_version_string(buf: &[u8], key: &str) -> Option<String> {
             )
         };
         if ok != 0 && len > 1 && !ptr.is_null() {
-            let s = unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(ptr as *const u16, len as usize)) };
+            let s = unsafe {
+                String::from_utf16_lossy(std::slice::from_raw_parts(
+                    ptr as *const u16,
+                    len as usize,
+                ))
+            };
             let s = s.trim_matches('\0').trim().to_string();
             if !s.is_empty() {
                 return Some(s);

@@ -4,9 +4,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use eframe::egui::{
-    self, Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Ui,
-};
+use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Ui};
 use tm_core::{fmt_bytes, fmt_percent, fmt_rate, GroupKind, ProcInfo, ProcStatus, Snapshot};
 
 use crate::icons::IconCache;
@@ -279,7 +277,11 @@ fn push_tree(
     }
     sort_indices(&mut children, snapshot, view.sort, view.desc);
     let default_open = proc.group != GroupKind::Apps;
-    let expanded = view.expansion.get(&proc.pid).copied().unwrap_or(default_open);
+    let expanded = view
+        .expansion
+        .get(&proc.pid)
+        .copied()
+        .unwrap_or(default_open);
     rows.push(Row::Proc {
         idx,
         depth,
@@ -288,7 +290,14 @@ fn push_tree(
     });
     if expanded {
         for child in children {
-            push_tree(child, indices, snapshot, view, depth.saturating_add(1), rows);
+            push_tree(
+                child,
+                indices,
+                snapshot,
+                view,
+                depth.saturating_add(1),
+                rows,
+            );
         }
     }
 }
@@ -315,7 +324,9 @@ pub fn compare(a: &ProcInfo, b: &ProcInfo, col: Col) -> Ordering {
     };
     match col {
         Col::Name | Col::Description => name_ord(),
-        Col::Status => status_rank(a.status).cmp(&status_rank(b.status)).then_with(name_ord),
+        Col::Status => status_rank(a.status)
+            .cmp(&status_rank(b.status))
+            .then_with(name_ord),
         Col::Cpu => a
             .cpu
             .partial_cmp(&b.cpu)
@@ -364,7 +375,8 @@ pub fn header(
     desc: bool,
 ) -> Option<Col> {
     let width = cols.iter().map(|(_, w)| *w).sum::<f32>() + 8.0;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, crate::theme::HEADER_H), Sense::hover());
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(width, crate::theme::HEADER_H), Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 0.0, palette.header);
     painter.line_segment(
@@ -379,18 +391,12 @@ pub fn header(
         Pos2::new(rect.right(), rect.bottom() - 1.0),
     );
     for (col, w) in cols {
-        let cell = Rect::from_min_size(
-            Pos2::new(x, rect.top()),
-            egui::vec2(*w, row_rect.height()),
-        );
-        let resp = ui.interact(
-            cell,
-            egui::Id::new(("hdr", *col as u8)),
-            Sense::click(),
-        );
+        let cell = Rect::from_min_size(Pos2::new(x, rect.top()), egui::vec2(*w, row_rect.height()));
+        let resp = ui.interact(cell, egui::Id::new(("hdr", *col as u8)), Sense::click());
         if resp.hovered() {
             ui.painter().rect_filled(cell, 0.0, palette.hover);
-        }        let align = if col.numeric() {
+        }
+        let align = if col.numeric() {
             Align2::RIGHT_CENTER
         } else {
             Align2::LEFT_CENTER
@@ -415,7 +421,7 @@ pub fn header(
                 cell.left() + 3.0
             };
             let cy = cell.center().y;
-            let dy = if desc { 2.0 } else { -2.0 };
+            let dy = 2.0;
             let tri = if desc {
                 vec![
                     Pos2::new(cx - 3.0, cy - dy),
@@ -424,9 +430,9 @@ pub fn header(
                 ]
             } else {
                 vec![
-                    Pos2::new(cx - 3.0, cy - dy),
-                    Pos2::new(cx + 3.0, cy - dy),
-                    Pos2::new(cx, cy + dy),
+                    Pos2::new(cx - 3.0, cy + dy),
+                    Pos2::new(cx + 3.0, cy + dy),
+                    Pos2::new(cx, cy - dy),
                 ]
             };
             ui.painter().add(egui::Shape::convex_polygon(
@@ -471,12 +477,7 @@ pub struct DrawCtx<'a> {
     pub icons: &'a mut IconCache,
 }
 
-pub fn draw_row(
-    ui: &mut Ui,
-    ctx: &mut DrawCtx<'_>,
-    row: Row,
-    out: &mut RowOut,
-) {
+pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) {
     let width = ctx.cols.iter().map(|(_, w)| *w).sum::<f32>() + 8.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, ROW_H), Sense::click());
     let palette = ctx.palette;
@@ -489,13 +490,11 @@ pub fn draw_row(
 
     let bg = match row {
         Row::Group { .. } => palette.group,
-        Row::Proc { depth, .. } => {
+        Row::Proc { .. } => {
             if is_selected {
                 palette.selected
             } else if hovered {
                 palette.hover
-            } else if depth > 0 {
-                palette.panel
             } else {
                 palette.panel
             }
@@ -516,7 +515,13 @@ pub fn draw_row(
             expanded,
         } => {
             let name_rect = Rect::from_min_size(rect.min, egui::vec2(ctx.cols[0].1, ROW_H));
-            draw_chevron(ui, palette, name_rect.left_center() + egui::vec2(10.0, 0.0), expanded, true);
+            draw_chevron(
+                ui,
+                palette,
+                name_rect.left_center() + egui::vec2(10.0, 0.0),
+                expanded,
+                true,
+            );
             ui.painter().with_clip_rect(name_rect).text(
                 Pos2::new(name_rect.left() + 24.0, name_rect.center().y),
                 Align2::LEFT_CENTER,
@@ -559,7 +564,13 @@ pub fn draw_row(
             // Стрелка дерева.
             let chevron_x = x + 6.0 + depth as f32 * 12.0;
             if children > 0 {
-                draw_chevron(ui, palette, Pos2::new(chevron_x + 4.0, rect.center().y), expanded, false);
+                draw_chevron(
+                    ui,
+                    palette,
+                    Pos2::new(chevron_x + 4.0, rect.center().y),
+                    expanded,
+                    false,
+                );
             }
             x += 14.0 + depth as f32 * 12.0;
 
@@ -584,11 +595,7 @@ pub fn draw_row(
                                 text_x += 22.0;
                             }
                         }
-                        let color = if proc.window.is_some() {
-                            palette.text
-                        } else {
-                            palette.text
-                        };
+                        let color = palette.text;
                         ui.painter().with_clip_rect(cell).text(
                             Pos2::new(text_x, cell.center().y),
                             Align2::LEFT_CENTER,
@@ -739,7 +746,10 @@ pub fn draw_row(
                 }
                 ui.separator();
                 if ui
-                    .add_enabled(path.is_some(), egui::Button::new("Открыть расположение файла"))
+                    .add_enabled(
+                        path.is_some(),
+                        egui::Button::new("Открыть расположение файла"),
+                    )
                     .clicked()
                 {
                     if let Some(path) = path.clone() {

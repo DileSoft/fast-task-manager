@@ -15,16 +15,13 @@ fn main() {
 
     let etw = tm_core::etw::Etw::start();
     std::thread::sleep(std::time::Duration::from_millis(1500));
-    println!(
-        "активно={} ошибка={:?}",
-        etw.active(),
-        etw.error()
-    );
+    println!("активно={} ошибка={:?}", etw.active(), etw.error());
 
     // Сетевая активность в этом процессе.
     let net_thread = std::thread::spawn(|| {
         if let Ok(mut stream) = TcpStream::connect("example.com:80") {
-            let _ = stream.write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n");
+            let _ = stream
+                .write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n");
             let mut buf = Vec::new();
             let _ = stream.read_to_end(&mut buf);
             println!("получено по сети: {} байт", buf.len());
@@ -60,7 +57,11 @@ fn main() {
             c.send,
             c.read,
             c.write,
-            if **pid == me { "  <- этот процесс" } else { "" }
+            if **pid == me {
+                "  <- этот процесс"
+            } else {
+                ""
+            }
         );
     }
     if let Some(c) = io.get(&me) {

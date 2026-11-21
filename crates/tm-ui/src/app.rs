@@ -4,12 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{
-    self, Align, Align2, Layout, Pos2, RichText, Sense, Stroke, StrokeKind, Ui,
-};
+use eframe::egui::{self, Align, Align2, Layout, Pos2, RichText, Sense, Stroke, StrokeKind, Ui};
 use tm_core::{
     fmt_bytes, fmt_cpu_time, fmt_filetime_local, fmt_percent, sys::actions, GroupKind, ProcInfo,
-    Snapshot, Sampler,
+    Sampler, Snapshot,
 };
 
 use crate::icons::IconCache;
@@ -133,12 +131,10 @@ impl App {
     fn apply_action(&mut self, action: Action, ctx: &egui::Context) {
         match action {
             Action::EndTask(pid, hwnd) => self.request_end_task(pid, hwnd),
-            Action::EndTree(pid) => {
-                match actions::end_task_tree(&self.snapshot.procs, pid) {
-                    Ok(n) => self.set_message(format!("Завершено процессов: {n}"), false),
-                    Err(e) => self.set_message(e, true),
-                }
-            }
+            Action::EndTree(pid) => match actions::end_task_tree(&self.snapshot.procs, pid) {
+                Ok(n) => self.set_message(format!("Завершено процессов: {n}"), false),
+                Err(e) => self.set_message(e, true),
+            },
             Action::OpenLocation(path) => {
                 if let Err(e) = actions::open_file_location(&path) {
                     self.set_message(e, true);
@@ -164,7 +160,11 @@ impl App {
                 .map(|p| {
                     matches!(
                         p.name.to_ascii_lowercase().as_str(),
-                        "explorer.exe" | "winlogon.exe" | "csrss.exe" | "wininit.exe" | "services.exe"
+                        "explorer.exe"
+                            | "winlogon.exe"
+                            | "csrss.exe"
+                            | "wininit.exe"
+                            | "services.exe"
                     )
                 })
                 .unwrap_or(false);
@@ -219,10 +219,20 @@ impl App {
                 let height = ui.available_height();
                 ui.horizontal(|ui| {
                     ui.add_space(10.0);
-                    let tabs = [(Tab::Processes, "Процессы"), (Tab::Performance, "Производительность")];
+                    let tabs = [
+                        (Tab::Processes, "Процессы"),
+                        (Tab::Performance, "Производительность"),
+                    ];
                     for (tab, label) in tabs {
                         let (rect, resp) = ui.allocate_exact_size(
-                            egui::vec2(if tab == Tab::Performance { 172.0 } else { 108.0 }, height),
+                            egui::vec2(
+                                if tab == Tab::Performance {
+                                    172.0
+                                } else {
+                                    108.0
+                                },
+                                height,
+                            ),
                             Sense::click(),
                         );
                         let active = self.tab == tab;
@@ -277,10 +287,7 @@ impl App {
     }
 
     fn toolbar(&mut self, ui: &mut Ui, ctx: &egui::Context) {
-        let can_kill = self
-            .selected_proc()
-            .map(|p| p.pid > 4)
-            .unwrap_or(false);
+        let can_kill = self.selected_proc().map(|p| p.pid > 4).unwrap_or(false);
         ui.horizontal(|ui| {
             ui.add_space(8.0);
             if ui
@@ -312,12 +319,16 @@ impl App {
                     .width(150.0)
                     .show_ui(ui, |ui| {
                         let mut changed = false;
-                        changed |= ui.selectable_value(&mut self.interval_ms, 500, "Высокая").changed();
-                        changed |= ui.selectable_value(&mut self.interval_ms, 1000, "Обычная").changed();
-                        changed |= ui.selectable_value(&mut self.interval_ms, 2000, "Низкая").changed();
-                        if ui
-                            .selectable_label(self.paused, "Приостановить")
-                            .clicked()
+                        changed |= ui
+                            .selectable_value(&mut self.interval_ms, 500, "Высокая")
+                            .changed();
+                        changed |= ui
+                            .selectable_value(&mut self.interval_ms, 1000, "Обычная")
+                            .changed();
+                        changed |= ui
+                            .selectable_value(&mut self.interval_ms, 2000, "Низкая")
+                            .changed();
+                        if ui.selectable_label(self.paused, "Приостановить").clicked()
                         {
                             self.paused = !self.paused;
                             self.sampler.set_paused(self.paused);
@@ -382,7 +393,10 @@ impl App {
                 self.sort_desc = !self.sort_desc;
             } else {
                 self.sort = col;
-                self.sort_desc = matches!(col, Col::Cpu | Col::Memory | Col::Disk | Col::Network | Col::Gpu | Col::Threads);
+                self.sort_desc = matches!(
+                    col,
+                    Col::Cpu | Col::Memory | Col::Disk | Col::Network | Col::Gpu | Col::Threads
+                );
             }
             self.rows_dirty = true;
         }
@@ -487,7 +501,9 @@ impl App {
                             .spacing([16.0, 5.0])
                             .show(ui, |ui| {
                                 let mut row = |k: &str, v: String| {
-                                    ui.label(RichText::new(k).color(self.palette.text_dim).size(12.0));
+                                    ui.label(
+                                        RichText::new(k).color(self.palette.text_dim).size(12.0),
+                                    );
                                     ui.label(RichText::new(v).size(12.5));
                                     ui.end_row();
                                 };
@@ -516,10 +532,7 @@ impl App {
                                 if p.gpu > 0.0 {
                                     row("Графический процессор", fmt_percent(p.gpu));
                                 }
-                                row(
-                                    "Файл",
-                                    p.exe_path.as_deref().unwrap_or("—").to_string(),
-                                );
+                                row("Файл", p.exe_path.as_deref().unwrap_or("—").to_string());
                                 row(
                                     "Описание",
                                     p.description.as_deref().unwrap_or("—").to_string(),
@@ -683,8 +696,12 @@ pub fn graph_rect(ui: &mut Ui, height: f32) -> egui::Rect {
 
 pub fn fill_bg(ui: &Ui, rect: egui::Rect, palette: &Palette) {
     ui.painter().rect_filled(rect, 0.0, palette.panel);
-    ui.painter()
-        .rect_stroke(rect, 0.0, Stroke::new(1.0_f32, palette.border), StrokeKind::Inside);
+    ui.painter().rect_stroke(
+        rect,
+        0.0,
+        Stroke::new(1.0_f32, palette.border),
+        StrokeKind::Inside,
+    );
 }
 
 pub fn dim_label(ui: &mut Ui, palette: &Palette, text: &str) {

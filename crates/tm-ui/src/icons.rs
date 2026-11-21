@@ -19,22 +19,13 @@ pub struct IconCache {
 }
 
 impl IconCache {
-    pub fn get(
-        &mut self,
-        ctx: &egui::Context,
-        path: &Arc<str>,
-    ) -> Option<egui::TextureId> {
+    pub fn get(&mut self, ctx: &egui::Context, path: &Arc<str>) -> Option<egui::TextureId> {
         if let Some(entry) = self.map.get(path) {
             return entry.as_ref().map(|t| t.id());
         }
         let image = load_icon(path);
-        let handle = image.map(|img| {
-            ctx.load_texture(
-                format!("icon:{path}"),
-                img,
-                TextureOptions::LINEAR,
-            )
-        });
+        let handle =
+            image.map(|img| ctx.load_texture(format!("icon:{path}"), img, TextureOptions::LINEAR));
         let id = handle.as_ref().map(|t| t.id());
         self.map.insert(path.clone(), handle);
         id
@@ -150,14 +141,17 @@ fn bitmap_to_image(bitmap: HANDLE) -> Option<ColorImage> {
         return None;
     }
 
-    let has_alpha = buf.chunks_exact(4).any(|px| px[3] != 0);
+    let has_alpha = buf.as_chunks::<4>().0.iter().any(|px| px[3] != 0);
     let mut pixels = Vec::with_capacity((w * h) as usize);
-    for px in buf.chunks_exact(4) {
+    for px in buf.as_chunks::<4>().0 {
         let b = px[0];
         let g = px[1];
         let r = px[2];
         let a = if has_alpha { px[3] } else { 255 };
         pixels.push(Color32::from_rgba_unmultiplied(r, g, b, a));
     }
-    Some(ColorImage { size: [w as usize, h as usize], pixels })
+    Some(ColorImage {
+        size: [w as usize, h as usize],
+        pixels,
+    })
 }

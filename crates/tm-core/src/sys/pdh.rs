@@ -7,8 +7,8 @@ use std::ffi::c_void;
 
 use windows_sys::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhGetFormattedCounterValue, PdhOpenQueryW, PDH_FMT_COUNTERVALUE,
-    PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA,
+    PdhGetFormattedCounterValue, PdhOpenQueryW, PDH_FMT_COUNTERVALUE, PDH_FMT_COUNTERVALUE_ITEM_W,
+    PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PDH_MORE_DATA,
 };
 
 use super::wide;
@@ -95,7 +95,7 @@ impl Query {
         }
 
         // Буфер выровнен под PDH_FMT_COUNTERVALUE_ITEM_W.
-        let words = (size as usize + 7) / 8 + 1;
+        let words = (size as usize).div_ceil(8) + 1;
         let mut buf = vec![0u64; words];
         let mut size2 = (words * 8) as u32;
         let mut count2 = count;

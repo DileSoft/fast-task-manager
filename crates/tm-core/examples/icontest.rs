@@ -11,7 +11,9 @@ use windows_sys::Win32::UI::Shell::ExtractIconExW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
 
 fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| r"C:\Windows\explorer.exe".to_string());
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| r"C:\Windows\explorer.exe".to_string());
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     let mut large: HICON = std::ptr::null_mut();
     let mut small: HICON = std::ptr::null_mut();
@@ -24,7 +26,10 @@ fn main() {
 
     let mut info: ICONINFO = unsafe { std::mem::zeroed() };
     let ok = unsafe { GetIconInfo(icon, &mut info) };
-    println!("GetIconInfo ok={ok} color={:?} mask={:?}", info.hbmColor, info.hbmMask);
+    println!(
+        "GetIconInfo ok={ok} color={:?} mask={:?}",
+        info.hbmColor, info.hbmMask
+    );
 
     let mut bm: BITMAP = unsafe { std::mem::zeroed() };
     let got = unsafe {
@@ -56,8 +61,12 @@ fn main() {
             DIB_RGB_COLORS,
         )
     };
-    println!("GetDIBits lines={lines} first_px={:?}", &buf[..16.min(buf.len())]);
-    let alpha_nonzero = buf.chunks_exact(4).filter(|p| p[3] != 0).count();
+    println!(
+        "GetDIBits lines={lines} first_px={:?}",
+        &buf[..16.min(buf.len())]
+    );
+    let (pixels4, _) = buf.as_chunks::<4>();
+    let alpha_nonzero = pixels4.iter().filter(|p| p[3] != 0).count();
     println!("alpha_nonzero={alpha_nonzero} total={}", buf.len() / 4);
 
     unsafe {

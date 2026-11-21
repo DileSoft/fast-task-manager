@@ -70,8 +70,7 @@ pub fn draw(
         let y_of = |v: f32| inner.bottom() - (v.clamp(0.0, max) / max) * inner.height();
 
         if fill {
-            let fill_color =
-                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 38);
+            let fill_color = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 38);
             for i in 0..values.len() - 1 {
                 let x0 = inner.left() + i as f32 * step;
                 let x1 = x0 + step;
@@ -111,8 +110,6 @@ pub fn tail(values: &[f32], n: usize) -> &[f32] {
 pub fn sparkline(ui: &Ui, rect: Rect, values: &[f32], color: Color32, palette: &Palette) {
     draw(ui, rect, &[(values, color)], None, palette, false, true);
 }
-
-/// Разделитель.
 
 /// Заливка «шкалы состава» (например, память: в работе/кэш/свободно).
 pub fn stacked_bar(ui: &Ui, rect: Rect, parts: &[(f32, Color32)]) {

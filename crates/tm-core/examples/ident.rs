@@ -2,8 +2,7 @@
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 fn main() {
@@ -48,7 +47,11 @@ fn main() {
             } else {
                 named += 1;
                 if shown < 3 {
-                    println!("{} {}", p.pid, String::from_utf16_lossy(&buf[..len as usize]));
+                    println!(
+                        "{} {}",
+                        p.pid,
+                        String::from_utf16_lossy(&buf[..len as usize])
+                    );
                 }
             }
             CloseHandle(h);

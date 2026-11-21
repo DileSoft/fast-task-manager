@@ -8,10 +8,22 @@ fn main() {
     let snap = sampler.latest();
     let s = &snap.system;
 
-    println!("тик #{}, сборка {:.1} мс, интервал {:.2} с", snap.seq, snap.collect_ms, snap.elapsed);
-    println!("процессов: {}, потоков: {}, handles: {}", s.processes, s.threads, s.handles);
-    println!("CPU: {:.1}% (ядро {:.1}%), ядер: {}", s.cpu_total, s.cpu_kernel, s.cores_logical);
-    println!("CPU: {} @ {} МГц, сейчас {} МГц", s.cpu_name, s.cpu_base_mhz, s.cpu_speed_mhz);
+    println!(
+        "тик #{}, сборка {:.1} мс, интервал {:.2} с",
+        snap.seq, snap.collect_ms, snap.elapsed
+    );
+    println!(
+        "процессов: {}, потоков: {}, handles: {}",
+        s.processes, s.threads, s.handles
+    );
+    println!(
+        "CPU: {:.1}% (ядро {:.1}%), ядер: {}",
+        s.cpu_total, s.cpu_kernel, s.cores_logical
+    );
+    println!(
+        "CPU: {} @ {} МГц, сейчас {} МГц",
+        s.cpu_name, s.cpu_base_mhz, s.cpu_speed_mhz
+    );
     println!(
         "память: занято {} из {} (доступно {}), кэш {}, коммит {} / {}",
         tm_core::fmt_bytes(s.mem_used),
@@ -77,14 +89,19 @@ fn main() {
     println!("\nИстория: {} точек", snap.history.len());
     let with_path = snap.procs.iter().filter(|p| p.exe_path.is_some()).count();
     let with_user = snap.procs.iter().filter(|p| p.user.is_some()).count();
-    let with_desc = snap.procs.iter().filter(|p| p.description.is_some()).count();
+    let with_desc = snap
+        .procs
+        .iter()
+        .filter(|p| p.description.is_some())
+        .count();
     println!(
         "идентификация: путей {with_path}, пользователей {with_user}, описаний {with_desc} из {}",
         snap.procs.len()
     );
     for p in snap.procs.iter().filter(|p| p.exe_path.is_some()).take(8) {
         println!("  {} -> {}", p.name, p.exe_path.as_deref().unwrap_or(""));
-    }    if let Some(last) = snap.history.last() {
+    }
+    if let Some(last) = snap.history.last() {
         println!("  последняя: {:?}", last);
     }
 }

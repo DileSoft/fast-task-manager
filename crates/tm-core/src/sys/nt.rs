@@ -3,7 +3,7 @@
 
 use ntapi::ntexapi::{
     NtQuerySystemInformation, SystemProcessInformation, SystemProcessorPerformanceInformation,
-    SYSTEM_PROCESS_INFORMATION, SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION,
+    SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION, SYSTEM_PROCESS_INFORMATION,
     SYSTEM_THREAD_INFORMATION,
 };
 
@@ -66,7 +66,7 @@ impl ProcessQuery {
             let status = unsafe {
                 NtQuerySystemInformation(
                     SystemProcessInformation,
-                    self.buf.as_mut_ptr() as *mut _, 
+                    self.buf.as_mut_ptr() as *mut _,
                     bytes as u32,
                     &mut required,
                 )
@@ -95,10 +95,9 @@ impl ProcessQuery {
         loop {
             let info = unsafe { &*(ptr as *const SYSTEM_PROCESS_INFORMATION) };
 
-            let name = from_wide_ptr(
-                info.ImageName.Buffer,
-                (info.ImageName.Length as usize) / 2,
-            );
+            let name = unsafe {
+                from_wide_ptr(info.ImageName.Buffer, (info.ImageName.Length as usize) / 2)
+            };
 
             let mut suspended = info.NumberOfThreads > 0;
             let mut thread_ids = Vec::new();
@@ -176,7 +175,7 @@ impl CpuQuery {
         let status = unsafe {
             NtQuerySystemInformation(
                 SystemProcessorPerformanceInformation,
-                self.buf.as_mut_ptr() as *mut _, 
+                self.buf.as_mut_ptr() as *mut _,
                 (self.buf.len() * std::mem::size_of::<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION>())
                     as u32,
                 &mut required,

@@ -20,7 +20,12 @@ pub fn from_wide_buf(buf: &[u16]) -> String {
     String::from_utf16_lossy(&buf[..end])
 }
 
-pub fn from_wide_ptr(ptr: *const u16, len: usize) -> String {
+/// Копирует wide-строку по указателю.
+///
+/// # Safety
+///
+/// `ptr` должен указывать на `len` валидных элементов `u16`.
+pub unsafe fn from_wide_ptr(ptr: *const u16, len: usize) -> String {
     if ptr.is_null() || len == 0 {
         return String::new();
     }
