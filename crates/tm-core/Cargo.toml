@@ -2,6 +2,7 @@
 name = "tm-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 ntapi = "0.4"

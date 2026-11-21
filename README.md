@@ -112,3 +112,7 @@ cargo run --release -p tm-core --example etwprobe
 `TM_DEBUG_IDENT=1` — статистика кэша, `TM_DEBUG_ICONS=1` — счётчики иконок,
 `TM_DEBUG_LAYOUT=1` — параметры окна, `TM_TAB=perf` — старт на вкладке
 «Производительность».
+
+## Лицензия
+
+MIT — см. [LICENSE](LICENSE).
