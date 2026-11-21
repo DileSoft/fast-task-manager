@@ -440,12 +440,8 @@ fn push_tree(
         return;
     }
     sort_tree(&mut children, snapshot, sums, view.sort, view.desc);
-    let default_open = proc.group != GroupKind::Apps;
-    let expanded = view
-        .expansion
-        .get(&proc.pid)
-        .copied()
-        .unwrap_or(default_open);
+    // По умолчанию дочерние процессы свёрнуты.
+    let expanded = view.expansion.get(&proc.pid).copied().unwrap_or(false);
     rows.push(Row::Proc {
         idx,
         depth,
