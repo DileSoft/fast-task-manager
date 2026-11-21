@@ -4,6 +4,7 @@ use std::time::Duration;
 
 fn main() {
     let sampler = tm_core::Sampler::start(1000);
+    sampler.set_cmdline_enabled(true);
     std::thread::sleep(Duration::from_millis(9000));
     let snap = sampler.latest();
     let s = &snap.system;
@@ -98,6 +99,31 @@ fn main() {
         "идентификация: путей {with_path}, пользователей {with_user}, описаний {with_desc} из {}",
         snap.procs.len()
     );
+    println!(
+        "диски: {:?}",
+        snap.disks
+            .iter()
+            .map(|d| (d.name.as_str(), d.volumes.as_str(), d.active, d.total))
+            .collect::<Vec<_>>()
+    );
+    println!(
+        "сеть: {:?}",
+        snap.nets
+            .iter()
+            .map(|n| (n.name.as_str(), n.recv_bps, n.send_bps, n.link_bps))
+            .collect::<Vec<_>>()
+    );
+    println!(
+        "командная строка этого процесса: {:?}",
+        tm_core::sys::identity::command_line(std::process::id())
+    );
+    println!(
+        "командных строк в снимке: {}",
+        snap.procs.iter().filter(|p| p.cmdline.is_some()).count()
+    );
+    if let Some(p) = snap.procs.iter().find(|p| p.cmdline.is_some()) {
+        println!("пример: {} -> {:?}", p.name, p.cmdline);
+    }
     for p in snap.procs.iter().filter(|p| p.exe_path.is_some()).take(8) {
         println!("  {} -> {}", p.name, p.exe_path.as_deref().unwrap_or(""));
     }

@@ -1,5 +1,8 @@
-//! Системная сеть: суммарные байты и скорость канала по всем активным
-//! адаптерам (GetIfTable2 — один дешёвый вызов).
+//! Системная сеть: все активные адаптеры через GetIfTable2.
+//!
+//! Отбрасываем только петлевые/туннельные/выключенные интерфейсы. Понятное
+//! имя берём из `Alias` («Ethernet», «Wi-Fi»), а служебное описание — из
+//! `Description`; фильтрация виртуальных дублей выполняется в сэмплере.
 
 use windows_sys::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
 
@@ -11,7 +14,10 @@ const IF_OPER_STATUS_UP: i32 = 1;
 
 #[derive(Clone, Debug)]
 pub struct AdapterSample {
+    /// Понятное имя подключения.
     pub name: String,
+    /// Описание драйвера/физического адаптера.
+    pub description: String,
     pub in_octets: u64,
     pub out_octets: u64,
     pub link_bps: u64,
@@ -37,32 +43,16 @@ pub fn query() -> Vec<AdapterSample> {
             if row.OperStatus as i32 != IF_OPER_STATUS_UP {
                 continue;
             }
-            let name = {
-                let desc = from_wide_buf(&row.Description);
-                if desc.is_empty() {
-                    from_wide_buf(&row.Alias)
-                } else {
-                    desc
-                }
+            let description = from_wide_buf(&row.Description);
+            let alias = from_wide_buf(&row.Alias);
+            let name = if alias.is_empty() {
+                description.clone()
+            } else {
+                alias
             };
-            let lower = name.to_ascii_lowercase();
-            if lower.contains("wfp")
-                || lower.contains("filter")
-                || lower.contains("virtual")
-                || lower.contains("pseudo")
-                || lower.contains("loopback")
-                || lower.contains("tunnel")
-                || lower.contains("bluetooth")
-                || lower.contains("npcap")
-                || lower.contains("qos")
-                || lower.contains("scheduler")
-                || lower.contains("-0000")
-                || lower.contains("lightweight")
-            {
-                continue;
-            }
             out.push(AdapterSample {
                 name,
+                description,
                 in_octets: row.InOctets,
                 out_octets: row.OutOctets,
                 link_bps: row.ReceiveLinkSpeed.max(row.TransmitLinkSpeed),

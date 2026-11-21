@@ -11,5 +11,6 @@ pub mod sys;
 pub use sampler::{is_admin, Sampler};
 pub use snapshot::{
     fmt_bytes, fmt_cpu_time, fmt_filetime_local, fmt_mhz, fmt_percent, fmt_rate, fmt_uptime,
-    Capabilities, GroupKind, HistPoint, ProcInfo, ProcStatus, Snapshot, SystemStats,
+    Capabilities, DiskStats, GroupKind, HistPoint, NetStats, ProcInfo, ProcStatus, Snapshot,
+    SystemStats,
 };

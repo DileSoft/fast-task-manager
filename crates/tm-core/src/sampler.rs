@@ -16,6 +16,7 @@ use crate::sys::{identity, mem, net, nt, pdh, registry, window};
 
 const HISTORY_LEN: usize = 600;
 const IDENTITY_BUDGET_PER_TICK: usize = 48;
+const CMDLINE_BUDGET_PER_TICK: usize = 64;
 
 #[derive(Clone, Copy, Debug)]
 struct ProcTimes {
@@ -63,6 +64,10 @@ struct Counters {
     disk_read: Option<usize>,
     disk_write: Option<usize>,
     disk_latency: Option<usize>,
+    disk_idle_arr: Option<usize>,
+    disk_read_arr: Option<usize>,
+    disk_write_arr: Option<usize>,
+    disk_latency_arr: Option<usize>,
     gpu_engine: Option<usize>,
     gpu_dedicated: Option<usize>,
     gpu_shared: Option<usize>,
@@ -88,6 +93,10 @@ impl Counters {
         let disk_read = q.add(r"\PhysicalDisk(_Total)\Disk Read Bytes/sec");
         let disk_write = q.add(r"\PhysicalDisk(_Total)\Disk Write Bytes/sec");
         let disk_latency = q.add(r"\PhysicalDisk(_Total)\Avg. Disk sec/Transfer");
+        let disk_idle_arr = q.add(r"\PhysicalDisk(*)\% Idle Time");
+        let disk_read_arr = q.add(r"\PhysicalDisk(*)\Disk Read Bytes/sec");
+        let disk_write_arr = q.add(r"\PhysicalDisk(*)\Disk Write Bytes/sec");
+        let disk_latency_arr = q.add(r"\PhysicalDisk(*)\Avg. Disk sec/Transfer");
         let gpu_engine = gpu.add(r"\GPU Engine(*)\Utilization Percentage");
         let gpu_dedicated = gpu.add(r"\GPU Adapter Memory(*)\Dedicated Usage");
         let gpu_shared = gpu.add(r"\GPU Adapter Memory(*)\Shared Usage");
@@ -110,6 +119,10 @@ impl Counters {
             disk_read,
             disk_write,
             disk_latency,
+            disk_idle_arr,
+            disk_read_arr,
+            disk_write_arr,
+            disk_latency_arr,
             gpu_engine,
             gpu_dedicated,
             gpu_shared,
@@ -145,6 +158,12 @@ struct Collector {
     gpu_shared_cache: u64,
     disk_space_cache: (u64, u64, u32),
     disk_space_tick: u64,
+    disk_capacity: HashMap<u32, (u64, u64)>,
+    disk_hist: HashMap<u32, Vec<f32>>,
+    net_hist_recv: HashMap<String, Vec<f32>>,
+    net_hist_send: HashMap<String, Vec<f32>>,
+    cmdline_enabled: bool,
+    cmdline_cache: HashMap<(u32, i64), Option<Arc<str>>>,
 }
 
 impl Collector {
@@ -178,6 +197,12 @@ impl Collector {
             gpu_shared_cache: 0,
             disk_space_cache: (0, 0, 0),
             disk_space_tick: 0,
+            disk_capacity: HashMap::new(),
+            disk_hist: HashMap::new(),
+            net_hist_recv: HashMap::new(),
+            net_hist_send: HashMap::new(),
+            cmdline_enabled: false,
+            cmdline_cache: HashMap::new(),
         }
     }
 
@@ -250,28 +275,81 @@ impl Collector {
             0.0
         };
 
-        // 4. Системная сеть.
+        // 4. Сеть: отдельные записи по адаптерам, дубли по имени подключения
+        //    схлопываем, предпочитая физический адаптер.
         self.net_buf.clear();
         self.net_buf.extend(net::query());
+        let mut unique: HashMap<String, net::AdapterSample> = HashMap::new();
+        for adapter in self.net_buf.drain(..) {
+            if is_adapter_filter(&adapter.name) || adapter.link_bps == 0 {
+                continue;
+            }
+            match unique.entry(adapter.name.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    let existing = slot.get();
+                    if is_virtual_adapter(&existing.description)
+                        && !is_virtual_adapter(&adapter.description)
+                    {
+                        slot.insert(adapter);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(adapter);
+                }
+            }
+        }
+
+        let mut nets: Vec<NetStats> = Vec::with_capacity(unique.len());
+        let mut prev_net = HashMap::with_capacity(unique.len());
         let mut recv_delta = 0u64;
         let mut send_delta = 0u64;
         let mut link_bps = 0u64;
-        let mut net_name = String::new();
-        for a in &self.net_buf {
-            if net_name.is_empty() {
-                net_name.clone_from(&a.name);
-            }
-            link_bps = link_bps.max(a.link_bps);
-            if let Some((pi, po)) = self.prev_net.get(&a.name) {
-                recv_delta += a.in_octets.saturating_sub(*pi);
-                send_delta += a.out_octets.saturating_sub(*po);
-            }
+        for (name, adapter) in unique {
+            let (dr, ds) = match self.prev_net.get(&name) {
+                Some((pi, po)) => (
+                    adapter.in_octets.saturating_sub(*pi),
+                    adapter.out_octets.saturating_sub(*po),
+                ),
+                None => (0, 0),
+            };
+            recv_delta += dr;
+            send_delta += ds;
+            link_bps = link_bps.max(adapter.link_bps);
+            prev_net.insert(name.clone(), (adapter.in_octets, adapter.out_octets));
+
+            let recv_bps = dr as f64 / elapsed;
+            let send_bps = ds as f64 / elapsed;
+            push_history(
+                self.net_hist_recv.entry(name.clone()).or_default(),
+                recv_bps as f32,
+            );
+            push_history(
+                self.net_hist_send.entry(name.clone()).or_default(),
+                send_bps as f32,
+            );
+            nets.push(NetStats {
+                name,
+                description: adapter.description,
+                recv_bps,
+                send_bps,
+                link_bps: adapter.link_bps,
+            });
         }
-        self.prev_net = self
-            .net_buf
+        self.prev_net = prev_net;
+        nets.sort_by(|a, b| {
+            is_virtual_adapter(&a.description)
+                .cmp(&is_virtual_adapter(&b.description))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        let live_nets: HashSet<String> = nets.iter().map(|n| n.name.clone()).collect();
+        self.net_hist_recv.retain(|k, _| live_nets.contains(k));
+        self.net_hist_send.retain(|k, _| live_nets.contains(k));
+        let net_name = nets
             .iter()
-            .map(|a| (a.name.clone(), (a.in_octets, a.out_octets)))
-            .collect();
+            .find(|n| !is_virtual_adapter(&n.description))
+            .or_else(|| nets.first())
+            .map(|n| n.name.clone())
+            .unwrap_or_else(|| "Сеть".to_string());
         lap("сеть");
         let net_recv_bps = recv_delta as f64 / elapsed;
         let net_send_bps = send_delta as f64 / elapsed;
@@ -305,6 +383,7 @@ impl Collector {
         let mut gpu_available = false;
         let mut cpu_perf = 100.0f64;
         let mut per_pid_gpu: HashMap<u32, f32> = HashMap::new();
+        let mut disk_map: HashMap<u32, (String, f32, f64, f64, f64)> = HashMap::new();
 
         if let Some(c) = self.counters.as_mut() {
             let t0 = Instant::now();
@@ -359,6 +438,29 @@ impl Collector {
             disk_read_bps = c.q.value(c.disk_read).unwrap_or(0.0).max(0.0);
             disk_write_bps = c.q.value(c.disk_write).unwrap_or(0.0).max(0.0);
             disk_latency_ms = c.q.value(c.disk_latency).unwrap_or(0.0).max(0.0) * 1000.0;
+
+            for (name, value) in c.q.array(c.disk_idle_arr) {
+                let (number, volumes) = parse_disk_instance(&name);
+                let entry = disk_map
+                    .entry(number)
+                    .or_insert((String::new(), 0.0, 0.0, 0.0, 0.0));
+                if !volumes.is_empty() {
+                    entry.0 = volumes;
+                }
+                entry.1 = (100.0 - value as f32).clamp(0.0, 100.0);
+            }
+            for (name, value) in c.q.array(c.disk_read_arr) {
+                let (number, _) = parse_disk_instance(&name);
+                disk_map.entry(number).or_default().2 = value.max(0.0);
+            }
+            for (name, value) in c.q.array(c.disk_write_arr) {
+                let (number, _) = parse_disk_instance(&name);
+                disk_map.entry(number).or_default().3 = value.max(0.0);
+            }
+            for (name, value) in c.q.array(c.disk_latency_arr) {
+                let (number, _) = parse_disk_instance(&name);
+                disk_map.entry(number).or_default().4 = value.max(0.0) * 1000.0;
+            }
 
             // GPU-счётчики тяжёлые (сотни экземпляров) — раз в 3 тика.
             if profile {
@@ -415,6 +517,65 @@ impl Collector {
         }
         lap("pdh");
 
+        // 5b. Диски и их история.
+        if self.disk_space_tick == 0 || self.seq - self.disk_space_tick >= 10 {
+            self.disk_space_cache = mem::disk_space();
+            self.disk_space_tick = self.seq;
+        }
+        let refresh_capacity = self.disk_space_tick == self.seq;
+        if refresh_capacity {
+            self.disk_capacity.clear();
+            for (number, (volumes, ..)) in &disk_map {
+                let (total, free) = volumes_capacity(volumes);
+                self.disk_capacity.insert(*number, (total, free));
+            }
+            if disk_map.is_empty() {
+                self.disk_capacity
+                    .insert(0, (self.disk_space_cache.0, self.disk_space_cache.1));
+            }
+        }
+
+        let mut numbers: Vec<u32> = disk_map.keys().copied().collect();
+        numbers.sort_unstable();
+        let mut disks: Vec<DiskStats> = Vec::with_capacity(numbers.len());
+        let mut disk_history: Vec<Vec<f32>> = Vec::with_capacity(numbers.len());
+        let mut hist_keys: Vec<u32> = Vec::with_capacity(numbers.len());
+        for number in &numbers {
+            let (volumes, active, read_bps, write_bps, response_ms) = disk_map[number].clone();
+            let (total, free) = self.disk_capacity.get(number).copied().unwrap_or((0, 0));
+            let hist = self.disk_hist.entry(*number).or_default();
+            push_history(hist, active);
+            disks.push(DiskStats {
+                name: format!("Диск {number}"),
+                volumes,
+                active,
+                read_bps,
+                write_bps,
+                response_ms,
+                total,
+                free,
+            });
+            disk_history.push(hist.clone());
+            hist_keys.push(*number);
+        }
+        if disks.is_empty() {
+            let hist = self.disk_hist.entry(0).or_default();
+            push_history(hist, disk_active);
+            disks.push(DiskStats {
+                name: "Диск 0".to_string(),
+                volumes: String::new(),
+                active: disk_active,
+                read_bps: disk_read_bps,
+                write_bps: disk_write_bps,
+                response_ms: disk_latency_ms,
+                total: self.disk_space_cache.0,
+                free: self.disk_space_cache.1,
+            });
+            disk_history.push(hist.clone());
+            hist_keys.push(0);
+        }
+        self.disk_hist.retain(|k, _| hist_keys.contains(k));
+
         // 6. Список процессов.
         let windows = window::visible_windows();
         lap("окна");
@@ -430,6 +591,7 @@ impl Collector {
         };
         let mut ident_ms = 0.0f64;
         let mut ident_count = 0usize;
+        let mut cmdline_budget = CMDLINE_BUDGET_PER_TICK;
         self.live_keys.clear();
         let io_snapshot: Option<HashMap<u32, etw::IoCounters>> = if etw_active {
             Some(
@@ -525,6 +687,24 @@ impl Collector {
                 } else {
                     raw.working_set
                 };
+                let cmdline = if self.cmdline_enabled {
+                    match self.cmdline_cache.get(&key) {
+                        Some(value) => value.clone(),
+                        None => {
+                            if cmdline_budget > 0 {
+                                cmdline_budget -= 1;
+                                let value =
+                                    identity::command_line(raw.pid).map(|s| Arc::from(s.as_str()));
+                                self.cmdline_cache.insert(key, value.clone());
+                                value
+                            } else {
+                                None
+                            }
+                        }
+                    }
+                } else {
+                    None
+                };
                 let name = if raw.pid == 0 && raw.name.is_empty() {
                     "System Idle Process".to_string()
                 } else {
@@ -542,6 +722,7 @@ impl Collector {
                     exe_path: ident.exe,
                     description: ident.desc,
                     user: ident.user,
+                    cmdline,
                     elevated: ident.elevated,
                     session_id: raw.session_id,
                     cpu,
@@ -567,6 +748,7 @@ impl Collector {
         self.prev_times = next_times;
         self.prev_io = next_io;
         self.identities.retain(|k, _| self.live_keys.contains(k));
+        self.cmdline_cache.retain(|k, _| self.live_keys.contains(k));
         if profile && ident_count > 0 {
             eprintln!(
                 "    идентификация: {ident_count} шт, {ident_ms:.1} мс ({:.2} мс/шт)",
@@ -616,10 +798,6 @@ impl Collector {
         // 8. Системные показатели.
         let uptime_secs =
             unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() / 1000 };
-        if self.disk_space_tick == 0 || self.seq - self.disk_space_tick >= 10 {
-            self.disk_space_cache = mem::disk_space();
-            self.disk_space_tick = self.seq;
-        }
         let (disk_total, disk_free, disk_count) = self.disk_space_cache;
         let cpu_speed = if self.cpu_base_mhz > 0 {
             ((self.cpu_base_mhz as f64) * cpu_perf / 100.0) as u32
@@ -692,8 +870,81 @@ impl Collector {
             },
             history: self.history.clone(),
             core_history: self.core_history.clone(),
+            disks,
+            nets: nets.clone(),
+            disk_history,
+            net_recv_history: nets
+                .iter()
+                .map(|n| self.net_hist_recv.get(&n.name).cloned().unwrap_or_default())
+                .collect(),
+            net_send_history: nets
+                .iter()
+                .map(|n| self.net_hist_send.get(&n.name).cloned().unwrap_or_default())
+                .collect(),
             capabilities,
         }
+    }
+}
+
+/// Служебные мини-порты-фильтры (QoS, WFP, Hyper-V Extension) — не отдельные
+/// сетевые подключения, а надстройки над реальным адаптером.
+fn is_adapter_filter(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("-0000")
+        || lower.contains("qos packet scheduler")
+        || lower.contains("wfp")
+        || lower.contains("lightweight filter")
+        || lower.contains("virtual switch extension")
+        || lower.contains("vswitch")
+}
+
+fn is_virtual_adapter(description: &str) -> bool {
+    let lower = description.to_ascii_lowercase();
+    [
+        "wfp",
+        "filter",
+        "qos",
+        "scheduler",
+        "lightweight",
+        "virtual",
+        "pseudo",
+        "npcap",
+        "loopback",
+        "tunnel",
+        "-0000",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+/// Имя экземпляра PDH вида «0 C: D:» → (номер диска, тома).
+fn parse_disk_instance(instance: &str) -> (u32, String) {
+    let mut parts = instance.splitn(2, ' ');
+    let number = parts
+        .next()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    let volumes = parts.next().unwrap_or("").trim().to_string();
+    (number, volumes)
+}
+
+fn volumes_capacity(volumes: &str) -> (u64, u64) {
+    let mut total = 0u64;
+    let mut free = 0u64;
+    for volume in volumes.split_whitespace() {
+        if let Some((t, f)) = mem::volume_space(volume) {
+            total += t;
+            free += f;
+        }
+    }
+    (total, free)
+}
+
+fn push_history(history: &mut Vec<f32>, value: f32) {
+    history.push(value);
+    if history.len() > HISTORY_LEN {
+        let excess = history.len() - HISTORY_LEN;
+        history.drain(0..excess);
     }
 }
 
@@ -758,6 +1009,7 @@ pub enum Cmd {
     SetInterval(u64),
     Pause(bool),
     Refresh,
+    SetCmdline(bool),
     Stop,
 }
 
@@ -805,6 +1057,12 @@ impl Sampler {
                             paused = false;
                             next = Instant::now();
                         }
+                        Ok(Cmd::SetCmdline(enabled)) => {
+                            collector.cmdline_enabled = enabled;
+                            if enabled {
+                                next = Instant::now();
+                            }
+                        }
                         Err(RecvTimeoutError::Timeout) => {
                             if paused {
                                 continue;
@@ -845,6 +1103,13 @@ impl Sampler {
     pub fn refresh_now(&self) {
         if let Ok(tx) = self.tx.lock() {
             let _ = tx.send(Cmd::Refresh);
+        }
+    }
+
+    /// Включает/выключает фон. чтение командных строк процессов.
+    pub fn set_cmdline_enabled(&self, enabled: bool) {
+        if let Ok(tx) = self.tx.lock() {
+            let _ = tx.send(Cmd::SetCmdline(enabled));
         }
     }
 

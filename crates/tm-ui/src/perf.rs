@@ -1,29 +1,49 @@
-//! Вкладка «Производительность»: список ресурсов и крупные графики.
+//! Вкладка «Производительность»: список ресурсов, графики и карточки.
+//!
+//! Ресурсы динамические: ЦП, память, каждый физический диск, каждый сетевой
+//! адаптер и (если есть счётчики) графический процессор.
 
-use eframe::egui::{self, Align, Align2, Layout, Pos2, RichText, Sense, Stroke};
-use tm_core::{fmt_bytes, fmt_mhz, fmt_percent, fmt_rate, fmt_uptime, Snapshot};
+use eframe::egui::{self, Align, Align2, Layout, Pos2, RichText, Sense};
+use tm_core::{fmt_bytes, fmt_mhz, fmt_percent, fmt_rate, fmt_uptime, Snapshot, SystemStats};
 
 use crate::app::{dim_label, fill_bg, graph_rect, stat_card, App};
 use crate::graph;
 use crate::theme::{bold, font, Palette};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Resource {
     Cpu,
     Memory,
-    Disk,
-    Network,
+    Disk(usize),
+    Network(usize),
     Gpu,
 }
 
 impl Resource {
-    pub fn label(self) -> &'static str {
+    pub fn kind(self) -> &'static str {
         match self {
-            Resource::Cpu => "ЦП",
-            Resource::Memory => "Память",
-            Resource::Disk => "Диск 0",
-            Resource::Network => "Сеть",
-            Resource::Gpu => "ГП 0",
+            Resource::Cpu => "cpu",
+            Resource::Memory => "memory",
+            Resource::Disk(_) => "disk",
+            Resource::Network(_) => "network",
+            Resource::Gpu => "gpu",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            Resource::Disk(i) | Resource::Network(i) => i,
+            _ => 0,
+        }
+    }
+
+    pub fn from_parts(kind: &str, index: usize) -> Self {
+        match kind {
+            "memory" => Resource::Memory,
+            "disk" => Resource::Disk(index),
+            "network" => Resource::Network(index),
+            "gpu" => Resource::Gpu,
+            _ => Resource::Cpu,
         }
     }
 
@@ -31,48 +51,127 @@ impl Resource {
         match self {
             Resource::Cpu => palette.accent,
             Resource::Memory => palette.mem,
-            Resource::Disk => palette.disk,
-            Resource::Network => palette.net,
+            Resource::Disk(_) => palette.disk,
+            Resource::Network(_) => palette.net,
             Resource::Gpu => palette.gpu,
         }
+    }
+}
+
+pub fn available(snapshot: &Snapshot) -> Vec<Resource> {
+    let mut list = vec![Resource::Cpu, Resource::Memory];
+    for i in 0..snapshot.disks.len() {
+        list.push(Resource::Disk(i));
+    }
+    for i in 0..snapshot.nets.len() {
+        list.push(Resource::Network(i));
+    }
+    if snapshot.capabilities.gpu_available || snapshot.system.gpu_dedicated > 0 {
+        list.push(Resource::Gpu);
+    }
+    list
+}
+
+fn label(snapshot: &Snapshot, res: Resource) -> String {
+    match res {
+        Resource::Cpu => "ЦП".to_string(),
+        Resource::Memory => "Память".to_string(),
+        Resource::Disk(i) => snapshot
+            .disks
+            .get(i)
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| "Диск".to_string()),
+        Resource::Network(i) => snapshot
+            .nets
+            .get(i)
+            .map(|n| n.name.clone())
+            .unwrap_or_else(|| "Сеть".to_string()),
+        Resource::Gpu => "ГП 0".to_string(),
+    }
+}
+
+fn value(snapshot: &Snapshot, res: Resource) -> String {
+    let s = &snapshot.system;
+    match res {
+        Resource::Cpu => fmt_percent(s.cpu_total),
+        Resource::Memory => fmt_percent(mem_percent(s)),
+        Resource::Disk(i) => snapshot
+            .disks
+            .get(i)
+            .map(|d| fmt_percent(d.active))
+            .unwrap_or_else(|| "0%".to_string()),
+        Resource::Network(i) => snapshot
+            .nets
+            .get(i)
+            .map(|n| {
+                let v = n.recv_bps.max(n.send_bps) as f32;
+                if v < 1024.0 {
+                    "0 Кбит/с".to_string()
+                } else {
+                    fmt_rate(v as f64)
+                }
+            })
+            .unwrap_or_default(),
+        Resource::Gpu => fmt_percent(s.gpu),
+    }
+}
+
+fn mem_percent(s: &SystemStats) -> f32 {
+    if s.mem_total > 0 {
+        s.mem_used as f32 / s.mem_total as f32 * 100.0
+    } else {
+        0.0
+    }
+}
+
+fn series(snapshot: &Snapshot, res: Resource) -> Vec<f32> {
+    match res {
+        Resource::Cpu => snapshot.history.iter().map(|h| h.cpu).collect(),
+        Resource::Memory => snapshot.history.iter().map(|h| h.mem).collect(),
+        Resource::Disk(i) => snapshot.disk_history.get(i).cloned().unwrap_or_default(),
+        Resource::Network(i) => snapshot
+            .net_recv_history
+            .get(i)
+            .cloned()
+            .unwrap_or_default(),
+        Resource::Gpu => snapshot.history.iter().map(|h| h.gpu).collect(),
     }
 }
 
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let snapshot = app.snapshot.clone();
     let palette = app.palette;
-
-    // Готовим ряды истории один раз на кадр.
-    let hist = &snapshot.history;
-    let cpu: Vec<f32> = hist.iter().map(|h| h.cpu).collect();
-    let mem: Vec<f32> = hist.iter().map(|h| h.mem).collect();
-    let disk: Vec<f32> = hist.iter().map(|h| h.disk).collect();
-    let net_r: Vec<f32> = hist.iter().map(|h| h.net_recv).collect();
-    let net_s: Vec<f32> = hist.iter().map(|h| h.net_send).collect();
-    let gpu: Vec<f32> = hist.iter().map(|h| h.gpu).collect();
+    let resources = available(&snapshot);
+    if !resources.contains(&app.perf_resource) {
+        app.perf_resource = resources.first().copied().unwrap_or(Resource::Cpu);
+    }
 
     let height = ui.available_height();
     let total_width = ui.available_width();
     let left_width = 238.0;
     let right_width = (total_width - left_width - 40.0).max(300.0);
+
     ui.horizontal_top(|ui| {
         ui.allocate_ui_with_layout(
             egui::vec2(left_width, height),
             Layout::top_down(Align::Min),
             |ui| {
                 ui.add_space(4.0);
-                let resources = available_resources(&snapshot);
-                for res in resources {
-                    let series: &[f32] = match res {
-                        Resource::Cpu => &cpu,
-                        Resource::Memory => &mem,
-                        Resource::Disk => &disk,
-                        Resource::Network => &net_r,
-                        Resource::Gpu => &gpu,
-                    };
-                    let value = resource_value(&snapshot, res);
-                    let selected = app.perf_resource == res;
-                    left_item(ui, &palette, res, value, series, selected);
+                for res in &resources {
+                    let selected = app.perf_resource == *res;
+                    let data = series(&snapshot, *res);
+                    if left_item(
+                        ui,
+                        &palette,
+                        &label(&snapshot, *res),
+                        value(&snapshot, *res),
+                        &data,
+                        res.color(&palette),
+                        selected,
+                    ) {
+                        app.perf_resource = *res;
+                        app.settings_dirty = true;
+                    }
                 }
             },
         );
@@ -85,75 +184,26 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             |ui| {
                 ui.set_width(right_width - 16.0);
                 ui.add_space(6.0);
-                if !available_resources(&snapshot).contains(&app.perf_resource) {
-                    app.perf_resource = Resource::Cpu;
-                }
-                if let Some(v) = ui.data_mut(|d| d.remove_temp::<u8>(egui::Id::new("perf_click"))) {
-                    app.perf_resource = match v {
-                        0 => Resource::Cpu,
-                        1 => Resource::Memory,
-                        2 => Resource::Disk,
-                        3 => Resource::Network,
-                        _ => Resource::Gpu,
-                    };
-                }
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.set_max_width(right_width - 18.0);
-                        right_panel(app, ui, &snapshot, &cpu, &mem, &disk, &net_r, &net_s, &gpu);
+                        right_panel(app, ui, &snapshot, app.perf_resource);
                     });
             },
         );
     });
 }
 
-fn available_resources(snapshot: &Snapshot) -> Vec<Resource> {
-    let mut list = vec![
-        Resource::Cpu,
-        Resource::Memory,
-        Resource::Disk,
-        Resource::Network,
-    ];
-    if snapshot.capabilities.gpu_available || snapshot.system.gpu_dedicated > 0 {
-        list.push(Resource::Gpu);
-    }
-    list
-}
-
-fn resource_value(snapshot: &Snapshot, res: Resource) -> String {
-    let s = &snapshot.system;
-    match res {
-        Resource::Cpu => fmt_percent(s.cpu_total),
-        Resource::Memory => {
-            let pct = if s.mem_total > 0 {
-                s.mem_used as f32 / s.mem_total as f32 * 100.0
-            } else {
-                0.0
-            };
-            fmt_percent(pct)
-        }
-        Resource::Disk => fmt_percent(s.disk_active),
-        Resource::Network => {
-            let v = s.net_recv_bps.max(s.net_send_bps) as f32;
-            if v < 1024.0 {
-                "0 Кбит/с".to_string()
-            } else {
-                fmt_rate(v as f64)
-            }
-        }
-        Resource::Gpu => fmt_percent(s.gpu),
-    }
-}
-
 fn left_item(
     ui: &mut egui::Ui,
     palette: &Palette,
-    res: Resource,
+    label: &str,
     value: String,
     series: &[f32],
+    color: egui::Color32,
     selected: bool,
-) {
+) -> bool {
     let width = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 56.0), Sense::click());
     let painter = ui.painter();
@@ -168,19 +218,26 @@ fn left_item(
         painter.rect_filled(rect, 2.0, palette.hover);
     }
 
-    painter.text(
-        Pos2::new(rect.left() + 12.0, rect.top() + 16.0),
-        Align2::LEFT_CENTER,
-        res.label(),
-        bold(13.5),
-        palette.text_strong,
-    );
-    painter.text(
+    theme_text(
+        ui,
         Pos2::new(rect.left() + 12.0, rect.top() + 36.0),
         Align2::LEFT_CENTER,
         value,
         font(12.0),
         palette.text_dim,
+    );
+    let label_clip = egui::Rect::from_min_max(
+        Pos2::new(rect.left() + 10.0, rect.top()),
+        Pos2::new(rect.right() - 92.0, rect.bottom()),
+    );
+    crate::theme::text_clipped(
+        ui,
+        label_clip,
+        Pos2::new(rect.left() + 12.0, rect.top() + 16.0),
+        Align2::LEFT_CENTER,
+        label,
+        bold(12.5),
+        palette.text_strong,
     );
 
     let spark = egui::Rect::from_min_size(
@@ -188,59 +245,83 @@ fn left_item(
         egui::vec2(74.0, 30.0),
     );
     if spark.left() > rect.left() + 100.0 {
-        graph::sparkline(ui, spark, series, res.color(palette), palette);
+        graph::sparkline(ui, spark, series, color, palette);
     }
-    if resp.clicked() {
-        // Клик обрабатывается в вызывающем коде через сравнение.
-    }
-    // Возвращаем факт клика через ответ — используем ui.data для простоты.
-    if resp.clicked() {
-        ui.data_mut(|d| d.insert_temp(egui::Id::new("perf_click"), res as u8));
-    }
+    resp.on_hover_text(label).clicked()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn right_panel(
-    app: &mut App,
-    ui: &mut egui::Ui,
-    snapshot: &Snapshot,
-    cpu: &[f32],
-    mem: &[f32],
-    disk: &[f32],
-    net_r: &[f32],
-    net_s: &[f32],
-    gpu: &[f32],
+fn theme_text(
+    ui: &egui::Ui,
+    pos: Pos2,
+    align: Align2,
+    text: impl ToString,
+    font_id: egui::FontId,
+    color: egui::Color32,
 ) {
+    crate::theme::text(ui, pos, align, text, font_id, color);
+}
+
+fn right_panel(app: &mut App, ui: &mut egui::Ui, snapshot: &Snapshot, res: Resource) {
     let palette = app.palette;
     let s = &snapshot.system;
-    let res = app.perf_resource;
-    let title = match res {
-        Resource::Cpu => "ЦП",
-        Resource::Memory => "Память",
-        Resource::Disk => "Диск 0",
-        Resource::Network => "Сеть",
-        Resource::Gpu => "Графический процессор 0",
-    };
-    let subtitle = match res {
-        Resource::Cpu => format!(
-            "{}  ·  {} логических процессоров  ·  {}",
-            s.cpu_name,
-            s.cores_logical,
-            fmt_mhz(s.cpu_speed_mhz.max(s.cpu_base_mhz))
+
+    let (title, subtitle, big) = match res {
+        Resource::Cpu => (
+            "ЦП".to_string(),
+            format!(
+                "{}  ·  {} логических процессоров  ·  {}",
+                s.cpu_name,
+                s.cores_logical,
+                fmt_mhz(s.cpu_speed_mhz.max(s.cpu_base_mhz))
+            ),
+            fmt_percent(s.cpu_total),
         ),
-        Resource::Memory => format!(
-            "{} из {}  ·  {} доступно",
-            fmt_bytes(s.mem_used),
-            fmt_bytes(s.mem_total),
-            fmt_bytes(s.mem_avail)
+        Resource::Memory => (
+            "Память".to_string(),
+            format!(
+                "{} из {}  ·  {} доступно",
+                fmt_bytes(s.mem_used),
+                fmt_bytes(s.mem_total),
+                fmt_bytes(s.mem_avail)
+            ),
+            fmt_percent(mem_percent(s)),
         ),
-        Resource::Disk => format!(
-            "Диск 0  ·  {} свободно из {}",
-            fmt_bytes(s.disk_free),
-            fmt_bytes(s.disk_total)
+        Resource::Disk(i) => {
+            let disk = snapshot.disks.get(i);
+            (
+                disk.map(|d| d.name.clone()).unwrap_or_default(),
+                disk.map(|d| {
+                    let volumes = if d.volumes.is_empty() {
+                        "физический диск".to_string()
+                    } else {
+                        format!("тома {}", d.volumes)
+                    };
+                    format!(
+                        "{}  ·  {} свободно из {}",
+                        volumes,
+                        fmt_bytes(d.free),
+                        fmt_bytes(d.total)
+                    )
+                })
+                .unwrap_or_default(),
+                fmt_percent(disk.map(|d| d.active).unwrap_or(0.0)),
+            )
+        }
+        Resource::Network(i) => {
+            let net = snapshot.nets.get(i);
+            (
+                net.map(|n| n.name.clone()).unwrap_or_default(),
+                net.map(|n| format!("{}  ·  канал {}", n.description, fmt_speed(n.link_bps)))
+                    .unwrap_or_default(),
+                net.map(|n| format!("↓ {}  ↑ {}", fmt_rate(n.recv_bps), fmt_rate(n.send_bps)))
+                    .unwrap_or_default(),
+            )
+        }
+        Resource::Gpu => (
+            "Графический процессор 0".to_string(),
+            format!("{}  ·  выделено {}", s.gpu_name, fmt_bytes(s.gpu_dedicated)),
+            fmt_percent(s.gpu),
         ),
-        Resource::Network => format!("{}  ·  канал {}", s.net_name, fmt_speed(s.net_link_bps)),
-        Resource::Gpu => format!("{}  ·  выделено {}", s.gpu_name, fmt_bytes(s.gpu_dedicated)),
     };
 
     ui.horizontal(|ui| {
@@ -249,23 +330,6 @@ fn right_panel(
             ui.label(RichText::new(subtitle).size(11.5).color(palette.text_dim));
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let big = match res {
-                Resource::Cpu => fmt_percent(s.cpu_total),
-                Resource::Memory => fmt_percent(if s.mem_total > 0 {
-                    s.mem_used as f32 / s.mem_total as f32 * 100.0
-                } else {
-                    0.0
-                }),
-                Resource::Disk => fmt_percent(s.disk_active),
-                Resource::Network => {
-                    format!(
-                        "↓ {}  ↑ {}",
-                        fmt_rate(s.net_recv_bps),
-                        fmt_rate(s.net_send_bps)
-                    )
-                }
-                Resource::Gpu => fmt_percent(s.gpu),
-            };
             ui.label(RichText::new(big).size(26.0).color(palette.text_strong));
         });
     });
@@ -276,10 +340,11 @@ fn right_panel(
 
     match res {
         Resource::Cpu => {
+            let cpu: Vec<f32> = snapshot.history.iter().map(|h| h.cpu).collect();
             graph::draw(
                 ui,
                 rect,
-                &[(cpu, palette.accent)],
+                &[(&cpu, palette.accent)],
                 Some(100.0),
                 &palette,
                 true,
@@ -301,13 +366,14 @@ fn right_panel(
                 ],
             );
             ui.add_space(8.0);
-            core_grid(ui, &palette, snapshot, graph_height);
+            core_grid(ui, &palette, snapshot);
         }
         Resource::Memory => {
+            let mem: Vec<f32> = snapshot.history.iter().map(|h| h.mem).collect();
             graph::draw(
                 ui,
                 rect,
-                &[(mem, palette.mem)],
+                &[(&mem, palette.mem)],
                 Some(100.0),
                 &palette,
                 true,
@@ -343,35 +409,53 @@ fn right_panel(
                 ],
             );
         }
-        Resource::Disk => {
+        Resource::Disk(i) => {
+            let hist = snapshot.disk_history.get(i).cloned().unwrap_or_default();
             graph::draw(
                 ui,
                 rect,
-                &[(disk, palette.disk)],
+                &[(&hist, palette.disk)],
                 Some(100.0),
                 &palette,
                 true,
                 true,
             );
             ui.add_space(8.0);
+            let d = snapshot.disks.get(i);
             stat_row(
                 ui,
                 &palette,
                 &[
-                    ("Активное время", fmt_percent(s.disk_active)),
-                    ("Чтение", fmt_rate(s.disk_read_bps)),
-                    ("Запись", fmt_rate(s.disk_write_bps)),
-                    ("Средний отклик", format!("{:.2} мс", s.disk_response_ms)),
-                    ("Ёмкость", fmt_bytes(s.disk_total)),
-                    ("Свободно", fmt_bytes(s.disk_free)),
+                    (
+                        "Активное время",
+                        fmt_percent(d.map(|d| d.active).unwrap_or(0.0)),
+                    ),
+                    ("Чтение", fmt_rate(d.map(|d| d.read_bps).unwrap_or(0.0))),
+                    ("Запись", fmt_rate(d.map(|d| d.write_bps).unwrap_or(0.0))),
+                    (
+                        "Средний отклик",
+                        format!("{:.2} мс", d.map(|d| d.response_ms).unwrap_or(0.0)),
+                    ),
+                    ("Ёмкость", fmt_bytes(d.map(|d| d.total).unwrap_or(0))),
+                    ("Свободно", fmt_bytes(d.map(|d| d.free).unwrap_or(0))),
                 ],
             );
         }
-        Resource::Network => {
+        Resource::Network(i) => {
+            let recv = snapshot
+                .net_recv_history
+                .get(i)
+                .cloned()
+                .unwrap_or_default();
+            let send = snapshot
+                .net_send_history
+                .get(i)
+                .cloned()
+                .unwrap_or_default();
             graph::draw(
                 ui,
                 rect,
-                &[(net_r, palette.net), (net_s, palette.warn)],
+                &[(&recv, palette.net), (&send, palette.warn)],
                 None,
                 &palette,
                 true,
@@ -382,31 +466,42 @@ fn right_panel(
                 legend_dot(
                     ui,
                     palette.net,
-                    &format!("Приём {}", fmt_rate(s.net_recv_bps)),
+                    &format!(
+                        "Приём {}",
+                        fmt_rate(snapshot.nets.get(i).map(|n| n.recv_bps).unwrap_or(0.0))
+                    ),
                 );
                 legend_dot(
                     ui,
                     palette.warn,
-                    &format!("Отправка {}", fmt_rate(s.net_send_bps)),
+                    &format!(
+                        "Отправка {}",
+                        fmt_rate(snapshot.nets.get(i).map(|n| n.send_bps).unwrap_or(0.0))
+                    ),
                 );
             });
             ui.add_space(8.0);
+            let n = snapshot.nets.get(i);
             stat_row(
                 ui,
                 &palette,
                 &[
-                    ("Приём", fmt_rate(s.net_recv_bps)),
-                    ("Отправка", fmt_rate(s.net_send_bps)),
-                    ("Канал", fmt_speed(s.net_link_bps)),
-                    ("Адаптер", s.net_name.clone()),
+                    ("Приём", fmt_rate(n.map(|n| n.recv_bps).unwrap_or(0.0))),
+                    ("Отправка", fmt_rate(n.map(|n| n.send_bps).unwrap_or(0.0))),
+                    ("Канал", fmt_speed(n.map(|n| n.link_bps).unwrap_or(0))),
+                    (
+                        "Адаптер",
+                        n.map(|n| n.description.clone()).unwrap_or_default(),
+                    ),
                 ],
             );
         }
         Resource::Gpu => {
+            let gpu: Vec<f32> = snapshot.history.iter().map(|h| h.gpu).collect();
             graph::draw(
                 ui,
                 rect,
-                &[(gpu, palette.gpu)],
+                &[(&gpu, palette.gpu)],
                 Some(100.0),
                 &palette,
                 true,
@@ -425,6 +520,7 @@ fn right_panel(
             );
         }
     }
+    let _ = app;
 }
 
 fn stat_row(ui: &mut egui::Ui, palette: &Palette, items: &[(&str, String)]) {
@@ -448,7 +544,7 @@ fn legend_dot(ui: &mut egui::Ui, color: egui::Color32, text: &str) {
     ui.label(RichText::new(text).size(11.5));
 }
 
-fn composition(ui: &mut egui::Ui, palette: &Palette, s: &tm_core::SystemStats) {
+fn composition(ui: &mut egui::Ui, palette: &Palette, s: &SystemStats) {
     let total = s.mem_total.max(1);
     let parts = [
         (s.mem_used as f32 / total as f32 * 100.0, palette.accent),
@@ -473,7 +569,7 @@ fn composition(ui: &mut egui::Ui, palette: &Palette, s: &tm_core::SystemStats) {
     });
 }
 
-fn core_grid(ui: &mut egui::Ui, palette: &Palette, snapshot: &Snapshot, graph_height: f32) {
+fn core_grid(ui: &mut egui::Ui, palette: &Palette, snapshot: &Snapshot) {
     let cores = snapshot.core_history.len();
     if cores == 0 {
         return;
@@ -482,7 +578,6 @@ fn core_grid(ui: &mut egui::Ui, palette: &Palette, snapshot: &Snapshot, graph_he
     if remaining < 70.0 {
         return;
     }
-    let _ = graph_height;
     let columns = 2usize;
     let gap = 6.0;
     let cell_w = (ui.available_width() - gap * (columns as f32 - 1.0)) / columns as f32;
@@ -504,7 +599,9 @@ fn core_grid(ui: &mut egui::Ui, palette: &Palette, snapshot: &Snapshot, graph_he
             {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(cell_w, cell_h), Sense::hover());
                 let last = hist.last().copied().unwrap_or(0.0);
-                ui.painter().with_clip_rect(rect).text(
+                crate::theme::text_clipped(
+                    ui,
+                    rect,
                     Pos2::new(rect.left() + 3.0, rect.top() + 4.0),
                     Align2::LEFT_TOP,
                     format!("Ядро {i}  {:.0}%", last),
@@ -532,5 +629,3 @@ fn fmt_speed(bits_per_sec: u64) -> String {
         format!("{:.0} Мбит/с", bits_per_sec as f64 / 1e6)
     }
 }
-
-pub fn _unused(_: &Stroke, _: &Palette) {}

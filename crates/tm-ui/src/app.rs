@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align, Align2, Layout, Pos2, RichText, Sense, Stroke, StrokeKind, Ui};
 use tm_core::{
-    fmt_bytes, fmt_cpu_time, fmt_filetime_local, fmt_percent, sys::actions, GroupKind, ProcInfo,
-    Sampler, Snapshot,
+    fmt_bytes, fmt_cpu_time, fmt_filetime_local, fmt_percent, sys::actions, sys::window, GroupKind,
+    ProcInfo, Sampler, Snapshot,
 };
 
 use crate::icons::IconCache;
 use crate::perf::{self, Resource};
+use crate::settings::Settings;
 use crate::table::{self, Action, Col};
 use crate::theme::{self, bold, font, Palette};
 
@@ -54,15 +55,44 @@ pub struct App {
 
     pub perf_resource: Resource,
     pub properties: Option<u32>,
+    properties_cmdline: Option<(u32, Option<String>)>,
     pub pending_kill: Option<PendingKill>,
     pub message: Option<(String, Instant, bool)>,
+
+    pub settings_dirty: bool,
+    last_settings_save: Instant,
+    cmdline_enabled: bool,
+    ctx: egui::Context,
+    last_window_size: (f32, f32),
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let dark = !tm_core::sys::registry::apps_use_light_theme();
+    pub fn new(cc: &eframe::CreationContext<'_>, settings: Settings) -> Self {
+        theme::update_scale(&cc.egui_ctx);
+        let dark = settings
+            .dark
+            .unwrap_or_else(|| !tm_core::sys::registry::apps_use_light_theme());
         let palette = theme::install(&cc.egui_ctx, dark);
-        let sampler = Sampler::start(1000);
+
+        let columns: Vec<Col> = settings
+            .columns
+            .iter()
+            .filter_map(|k| Col::from_key(k))
+            .collect();
+        let columns = if columns.is_empty() {
+            table::DEFAULT_COLUMNS.to_vec()
+        } else {
+            columns
+        };
+        let cmdline_enabled = columns.contains(&Col::CommandLine);
+
+        let sampler = Sampler::start(settings.interval_ms.max(100));
+        if settings.paused {
+            sampler.set_paused(true);
+        }
+        if cmdline_enabled {
+            sampler.set_cmdline_enabled(true);
+        }
         let snapshot = sampler.latest();
         let mut app = Self {
             sampler,
@@ -74,12 +104,12 @@ impl App {
             } else {
                 Tab::Processes
             },
-            columns: table::DEFAULT_COLUMNS.to_vec(),
-            sort: Col::Cpu,
-            sort_desc: true,
+            columns,
+            sort: Col::from_key(&settings.sort).unwrap_or(Col::Cpu),
+            sort_desc: settings.sort_desc,
             search: String::new(),
             search_id: None,
-            group_by_type: true,
+            group_by_type: settings.group_by_type,
             selection: None,
             collapsed_groups: HashSet::new(),
             expansion: HashMap::new(),
@@ -87,21 +117,56 @@ impl App {
             rows_dirty: true,
             rows_seq: 0,
             icons: IconCache::default(),
-            interval_ms: 1000,
-            paused: false,
-            perf_resource: match std::env::var("TM_PERF").ok().as_deref() {
-                Some("mem") => Resource::Memory,
-                Some("disk") => Resource::Disk,
-                Some("net") => Resource::Network,
-                Some("gpu") => Resource::Gpu,
-                _ => Resource::Cpu,
-            },
+            interval_ms: settings.interval_ms.max(100),
+            paused: settings.paused,
+            perf_resource: Resource::from_parts(&settings.perf_kind, settings.perf_index),
             properties: None,
+            properties_cmdline: None,
             pending_kill: None,
             message: None,
+            settings_dirty: true,
+            last_settings_save: Instant::now(),
+            cmdline_enabled,
+            ctx: cc.egui_ctx.clone(),
+            last_window_size: (settings.window_w.max(760.0), settings.window_h.max(460.0)),
         };
         app.rebuild_rows();
         app
+    }
+
+    fn current_settings(&self, ctx: &egui::Context) -> Settings {
+        let (mut window_w, mut window_h) = self.last_window_size;
+        if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
+            window_w = rect.width();
+            window_h = rect.height();
+        }
+        Settings {
+            columns: self.columns.iter().map(|c| c.key().to_string()).collect(),
+            sort: self.sort.key().to_string(),
+            sort_desc: self.sort_desc,
+            group_by_type: self.group_by_type,
+            interval_ms: self.interval_ms,
+            paused: self.paused,
+            dark: Some(self.dark),
+            perf_kind: self.perf_resource.kind().to_string(),
+            perf_index: self.perf_resource.index(),
+            window_w,
+            window_h,
+        }
+    }
+
+    fn save_settings(&mut self, ctx: &egui::Context) {
+        self.current_settings(ctx).save();
+        self.settings_dirty = false;
+        self.last_settings_save = Instant::now();
+    }
+
+    fn sync_cmdline(&mut self) {
+        let wanted = self.columns.contains(&Col::CommandLine);
+        if wanted != self.cmdline_enabled {
+            self.cmdline_enabled = wanted;
+            self.sampler.set_cmdline_enabled(wanted);
+        }
     }
 
     pub fn selected_proc(&self) -> Option<&ProcInfo> {
@@ -128,6 +193,19 @@ impl App {
         self.message = Some((text.into(), Instant::now(), error));
     }
 
+    fn open_properties(&mut self, pid: u32) {
+        let cmdline = if let Some(p) = self.snapshot.proc_by_pid(pid) {
+            match &p.cmdline {
+                Some(text) => Some(text.to_string()),
+                None => tm_core::sys::identity::command_line(pid),
+            }
+        } else {
+            None
+        };
+        self.properties_cmdline = Some((pid, cmdline));
+        self.properties = Some(pid);
+    }
+
     fn apply_action(&mut self, action: Action, ctx: &egui::Context) {
         match action {
             Action::EndTask(pid, hwnd) => self.request_end_task(pid, hwnd),
@@ -140,7 +218,12 @@ impl App {
                     self.set_message(e, true);
                 }
             }
-            Action::Properties(pid) => self.properties = Some(pid),
+            Action::FocusWindow(hwnd) => {
+                if !window::focus_window(hwnd) {
+                    self.set_message("Не удалось переключиться на окно процесса", true);
+                }
+            }
+            Action::Properties(pid) => self.open_properties(pid),
             Action::Copy(text) => ctx.copy_text(text),
             Action::Elevate => {
                 if let Err(e) = actions::restart_elevated() {
@@ -204,7 +287,7 @@ impl App {
             self.rows_dirty = true;
         }
         if let Some(pid) = out.open_properties {
-            self.properties = Some(pid);
+            self.open_properties(pid);
         }
         for action in out.actions {
             self.apply_action(action, ctx);
@@ -213,7 +296,7 @@ impl App {
 
     fn tab_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("tabbar")
-            .exact_height(40.0)
+            .exact_height(theme::pt(40.0))
             .frame(egui::Frame::NONE.fill(self.palette.bg))
             .show(ctx, |ui| {
                 let height = ui.available_height();
@@ -251,7 +334,8 @@ impl App {
                         } else {
                             self.palette.text_dim
                         };
-                        ui.painter().text(
+                        theme::text(
+                            ui,
                             rect.center(),
                             Align2::CENTER_CENTER,
                             label,
@@ -265,14 +349,11 @@ impl App {
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(8.0);
-                        let icon = if self.dark { "☀" } else { "☾" };
-                        if ui
-                            .add(egui::Button::new(RichText::new(icon).size(16.0)).frame(false))
-                            .on_hover_text("Сменить тему")
-                            .clicked()
-                        {
+                        let resp = theme::theme_button(ui, &self.palette, self.dark);
+                        if resp.on_hover_text("Сменить тему").clicked() {
                             self.dark = !self.dark;
                             self.palette = theme::install(ctx, self.dark);
+                            self.settings_dirty = true;
                         }
                         if self.snapshot.system.admin {
                             ui.label(
@@ -288,6 +369,7 @@ impl App {
 
     fn toolbar(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         let can_kill = self.selected_proc().map(|p| p.pid > 4).unwrap_or(false);
+        let columns_before = self.columns.clone();
         ui.horizontal(|ui| {
             ui.add_space(8.0);
             if ui
@@ -298,6 +380,18 @@ impl App {
                     let (pid, hwnd) = (p.pid, p.window);
                     self.request_end_task(pid, hwnd);
                 }
+            }
+
+            ui.add_space(6.0);
+            let pause_label = if self.paused {
+                "Продолжить"
+            } else {
+                "Пауза"
+            };
+            if ui.button(pause_label).clicked() {
+                self.paused = !self.paused;
+                self.sampler.set_paused(self.paused);
+                self.settings_dirty = true;
             }
 
             ui.add_space(10.0);
@@ -328,15 +422,11 @@ impl App {
                         changed |= ui
                             .selectable_value(&mut self.interval_ms, 2000, "Низкая")
                             .changed();
-                        if ui.selectable_label(self.paused, "Приостановить").clicked()
-                        {
-                            self.paused = !self.paused;
-                            self.sampler.set_paused(self.paused);
-                        }
                         if changed {
                             self.paused = false;
                             self.sampler.set_paused(false);
                             self.sampler.set_interval(self.interval_ms);
+                            self.settings_dirty = true;
                         }
                     });
                 table::columns_menu(ui, &self.palette, &mut self.columns);
@@ -346,6 +436,7 @@ impl App {
                         .changed()
                     {
                         self.rows_dirty = true;
+                        self.settings_dirty = true;
                     }
                     if ui.button("Обновить").clicked() {
                         self.sampler.refresh_now();
@@ -354,6 +445,10 @@ impl App {
                 });
             });
         });
+        if self.columns != columns_before {
+            self.sync_cmdline();
+            self.settings_dirty = true;
+        }
         let _ = ctx;
     }
 
@@ -370,8 +465,13 @@ impl App {
     }
 
     fn processes_tab(&mut self, ui: &mut Ui, ctx: &egui::Context) {
-        self.toolbar(ui, ctx);
-        ui.add_space(2.0);
+        let toolbar_height = theme::pt(34.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), toolbar_height),
+            Layout::left_to_right(Align::Center),
+            |ui| self.toolbar(ui, ctx),
+        );
+        ui.add_space(theme::pt(2.0));
 
         if !self.snapshot.capabilities.per_process_io {
             let text = if !self.snapshot.system.admin {
@@ -399,6 +499,7 @@ impl App {
                 );
             }
             self.rows_dirty = true;
+            self.settings_dirty = true;
         }
 
         let rows = self.rows.clone();
@@ -414,7 +515,7 @@ impl App {
             };
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show_rows(ui, theme::ROW_H, rows.len(), |ui, range| {
+                .show_rows(ui, theme::row_h(), rows.len(), |ui, range| {
                     for i in range {
                         table::draw_row(ui, &mut draw_ctx, rows[i], &mut out);
                     }
@@ -533,6 +634,11 @@ impl App {
                                     row("Графический процессор", fmt_percent(p.gpu));
                                 }
                                 row("Файл", p.exe_path.as_deref().unwrap_or("—").to_string());
+                                if let Some((cmd_pid, Some(cmd))) = &self.properties_cmdline {
+                                    if *cmd_pid == p.pid {
+                                        row("Командная строка", cmd.clone());
+                                    }
+                                }
                                 row(
                                     "Описание",
                                     p.description.as_deref().unwrap_or("—").to_string(),
@@ -608,6 +714,10 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        theme::update_scale(ctx);
+        if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
+            self.last_window_size = (rect.width(), rect.height());
+        }
         let snap = self.sampler.latest();
         if snap.seq != self.snapshot.seq {
             self.snapshot = snap;
@@ -658,7 +768,7 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(self.palette.bg))
             .show(ctx, |ui| {
-                ui.add_space(4.0);
+                ui.add_space(theme::pt(4.0));
                 ui.horizontal(|ui| {
                     ui.add_space(6.0);
                 });
@@ -669,7 +779,15 @@ impl eframe::App for App {
             });
 
         self.dialogs(ctx);
+        if self.settings_dirty && self.last_settings_save.elapsed() > Duration::from_millis(700) {
+            self.save_settings(ctx);
+        }
         ctx.request_repaint_after(Duration::from_millis(200));
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let ctx = self.ctx.clone();
+        self.save_settings(&ctx);
     }
 }
 

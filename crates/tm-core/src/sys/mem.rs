@@ -35,6 +35,35 @@ pub fn collect() -> MemoryInfo {
     info
 }
 
+/// Ёмкость и свободное место одного тома («C:»).
+pub fn volume_space(volume: &str) -> Option<(u64, u64)> {
+    let letter = volume.trim_end_matches(':');
+    if letter.len() != 1 {
+        return None;
+    }
+    let root = format!("{letter}:\\");
+    let wroot = wide(&root);
+    if unsafe { GetDriveTypeW(wroot.as_ptr()) } != DRIVE_FIXED {
+        return None;
+    }
+    let mut avail = 0u64;
+    let mut total = 0u64;
+    let mut free = 0u64;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wroot.as_ptr(),
+            &mut avail as *mut u64,
+            &mut total as *mut u64,
+            &mut free as *mut u64,
+        )
+    };
+    if ok != 0 && total > 0 {
+        Some((total, free))
+    } else {
+        None
+    }
+}
+
 /// Суммарная ёмкость и свободное место на фиксированных дисках.
 /// Вызывать не чаще раза в несколько секунд.
 pub fn disk_space() -> (u64, u64, u32) {

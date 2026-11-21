@@ -8,7 +8,7 @@ use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind,
 use tm_core::{fmt_bytes, fmt_percent, fmt_rate, GroupKind, ProcInfo, ProcStatus, Snapshot};
 
 use crate::icons::IconCache;
-use crate::theme::{bold, font, Palette, ROW_H};
+use crate::theme::{self, bold, font, Palette};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Col {
@@ -22,6 +22,8 @@ pub enum Col {
     User,
     Threads,
     Pid,
+    Path,
+    CommandLine,
     Description,
 }
 
@@ -38,8 +40,65 @@ impl Col {
             Col::User => "Пользователь",
             Col::Threads => "Потоки",
             Col::Pid => "PID",
+            Col::Path => "Путь к файлу",
+            Col::CommandLine => "Командная строка",
             Col::Description => "Описание",
         }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Col::Name => "name",
+            Col::Status => "status",
+            Col::Cpu => "cpu",
+            Col::Memory => "memory",
+            Col::Disk => "disk",
+            Col::Network => "network",
+            Col::Gpu => "gpu",
+            Col::User => "user",
+            Col::Threads => "threads",
+            Col::Pid => "pid",
+            Col::Path => "path",
+            Col::CommandLine => "command_line",
+            Col::Description => "description",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Col> {
+        Some(match key {
+            "name" => Col::Name,
+            "status" => Col::Status,
+            "cpu" => Col::Cpu,
+            "memory" => Col::Memory,
+            "disk" => Col::Disk,
+            "network" => Col::Network,
+            "gpu" => Col::Gpu,
+            "user" => Col::User,
+            "threads" => Col::Threads,
+            "pid" => Col::Pid,
+            "path" => Col::Path,
+            "command_line" => Col::CommandLine,
+            "description" => Col::Description,
+            _ => return None,
+        })
+    }
+
+    pub fn all() -> [Col; 13] {
+        [
+            Col::Name,
+            Col::Status,
+            Col::Cpu,
+            Col::Memory,
+            Col::Disk,
+            Col::Network,
+            Col::Gpu,
+            Col::User,
+            Col::Threads,
+            Col::Pid,
+            Col::Path,
+            Col::CommandLine,
+            Col::Description,
+        ]
     }
 
     pub fn width(self) -> f32 {
@@ -54,6 +113,8 @@ impl Col {
             Col::User => 128.0,
             Col::Threads => 62.0,
             Col::Pid => 64.0,
+            Col::Path => 260.0,
+            Col::CommandLine => 300.0,
             Col::Description => 180.0,
         }
     }
@@ -62,6 +123,13 @@ impl Col {
         matches!(
             self,
             Col::Cpu | Col::Memory | Col::Disk | Col::Network | Col::Gpu | Col::Threads | Col::Pid
+        )
+    }
+
+    pub fn flexible(self) -> bool {
+        matches!(
+            self,
+            Col::Name | Col::Path | Col::CommandLine | Col::Description
         )
     }
 }
@@ -81,7 +149,7 @@ pub fn layout(available: f32, cols: &[Col]) -> Vec<(Col, f32)> {
     let mut fixed = 0.0;
     let mut flex_count = 0;
     for c in cols {
-        if matches!(c, Col::Name | Col::Description) {
+        if c.flexible() {
             flex_count += 1;
         } else {
             fixed += c.width();
@@ -93,11 +161,7 @@ pub fn layout(available: f32, cols: &[Col]) -> Vec<(Col, f32)> {
     }
     cols.iter()
         .map(|c| {
-            let w = if matches!(c, Col::Name | Col::Description) {
-                flex_width
-            } else {
-                c.width()
-            };
+            let w = if c.flexible() { flex_width } else { c.width() };
             (*c, w)
         })
         .collect()
@@ -125,6 +189,7 @@ pub enum Action {
     EndTask(u32, Option<isize>),
     EndTree(u32),
     OpenLocation(Arc<str>),
+    FocusWindow(isize),
     Properties(u32),
     Copy(String),
     Elevate,
@@ -181,12 +246,17 @@ pub fn build_rows(view: &View<'_>) -> Vec<Row> {
     let mut rows = Vec::with_capacity(indices.len() + 3);
 
     if !view.group_by_type {
-        let mut roots = build_tree(&indices, snapshot);
-        sort_indices(&mut roots, snapshot, view.sort, view.desc);
-        for idx in roots {
-            push_tree(idx, &indices, snapshot, view, 0, &mut rows);
-        }
-        return rows;
+        let mut flat = indices;
+        sort_indices(&mut flat, snapshot, view.sort, view.desc);
+        return flat
+            .into_iter()
+            .map(|idx| Row::Proc {
+                idx,
+                depth: 0,
+                children: 0,
+                expanded: false,
+            })
+            .collect();
     }
 
     for kind in order {
@@ -355,6 +425,20 @@ pub fn compare(a: &ProcInfo, b: &ProcInfo, col: Col) -> Ordering {
             .then_with(name_ord),
         Col::Threads => a.threads.cmp(&b.threads).then_with(name_ord),
         Col::Pid => a.pid.cmp(&b.pid),
+        Col::Path => a
+            .exe_path
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .cmp(&b.exe_path.as_deref().unwrap_or("").to_lowercase())
+            .then_with(name_ord),
+        Col::CommandLine => a
+            .cmdline
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .cmp(&b.cmdline.as_deref().unwrap_or("").to_lowercase())
+            .then_with(name_ord),
     }
 }
 
@@ -375,8 +459,7 @@ pub fn header(
     desc: bool,
 ) -> Option<Col> {
     let width = cols.iter().map(|(_, w)| *w).sum::<f32>() + 8.0;
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(width, crate::theme::HEADER_H), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, theme::header_h()), Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 0.0, palette.header);
     painter.line_segment(
@@ -411,9 +494,7 @@ pub fn header(
         } else {
             palette.text
         };
-        ui.painter()
-            .with_clip_rect(cell)
-            .text(pos, align, col.label(), font(12.5), color);
+        theme::text_clipped(ui, cell, pos, align, col.label(), font(12.5), color);
         if *col == sort {
             let cx = if col.numeric() {
                 cell.right() - 3.0
@@ -479,7 +560,7 @@ pub struct DrawCtx<'a> {
 
 pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) {
     let width = ctx.cols.iter().map(|(_, w)| *w).sum::<f32>() + 8.0;
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, ROW_H), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, theme::row_h()), Sense::click());
     let palette = ctx.palette;
 
     let hovered = resp.hovered();
@@ -514,7 +595,8 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
             count,
             expanded,
         } => {
-            let name_rect = Rect::from_min_size(rect.min, egui::vec2(ctx.cols[0].1, ROW_H));
+            let name_rect =
+                Rect::from_min_size(rect.min, egui::vec2(ctx.cols[0].1, theme::row_h()));
             draw_chevron(
                 ui,
                 palette,
@@ -522,7 +604,9 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                 expanded,
                 true,
             );
-            ui.painter().with_clip_rect(name_rect).text(
+            theme::text_clipped(
+                ui,
+                name_rect,
                 Pos2::new(name_rect.left() + 24.0, name_rect.center().y),
                 Align2::LEFT_CENTER,
                 format!("{} ({})", kind.label(), count),
@@ -531,14 +615,17 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
             );
             let mut x = rect.left() + 2.0 + ctx.cols[0].1;
             for (col, w) in &ctx.cols[1..] {
-                let cell = Rect::from_min_size(Pos2::new(x, rect.top()), egui::vec2(*w, ROW_H));
+                let cell =
+                    Rect::from_min_size(Pos2::new(x, rect.top()), egui::vec2(*w, theme::row_h()));
                 let text = match col {
                     Col::Cpu => fmt_percent(cpu),
                     Col::Memory => fmt_bytes(mem),
                     _ => String::new(),
                 };
                 if !text.is_empty() {
-                    ui.painter().with_clip_rect(cell).text(
+                    theme::text_clipped(
+                        ui,
+                        cell,
                         Pos2::new(cell.right() - 8.0, cell.center().y),
                         Align2::RIGHT_CENTER,
                         text,
@@ -575,7 +662,8 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
             x += 14.0 + depth as f32 * 12.0;
 
             for (col, w) in ctx.cols {
-                let cell = Rect::from_min_size(Pos2::new(x, rect.top()), egui::vec2(*w, ROW_H));
+                let cell =
+                    Rect::from_min_size(Pos2::new(x, rect.top()), egui::vec2(*w, theme::row_h()));
                 match col {
                     Col::Name => {
                         // Иконка.
@@ -596,7 +684,9 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                             }
                         }
                         let color = palette.text;
-                        ui.painter().with_clip_rect(cell).text(
+                        theme::text_clipped(
+                            ui,
+                            cell,
                             Pos2::new(text_x, cell.center().y),
                             Align2::LEFT_CENTER,
                             proc.task_name(),
@@ -610,7 +700,9 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                             ProcStatus::Suspended => palette.text_dim,
                             ProcStatus::Running => palette.text,
                         };
-                        ui.painter().with_clip_rect(cell).text(
+                        theme::text_clipped(
+                            ui,
+                            cell,
                             Pos2::new(cell.left() + 8.0, cell.center().y),
                             Align2::LEFT_CENTER,
                             proc.status.label(),
@@ -624,7 +716,9 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                         } else {
                             palette.text_dim
                         };
-                        ui.painter().with_clip_rect(cell).text(
+                        theme::text_clipped(
+                            ui,
+                            cell,
                             Pos2::new(cell.right() - 8.0, cell.center().y),
                             Align2::RIGHT_CENTER,
                             fmt_percent(proc.cpu),
@@ -633,7 +727,9 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                         );
                     }
                     Col::Memory => {
-                        ui.painter().with_clip_rect(cell).text(
+                        theme::text_clipped(
+                            ui,
+                            cell,
                             Pos2::new(cell.right() - 8.0, cell.center().y),
                             Align2::RIGHT_CENTER,
                             fmt_bytes(proc.working_set),
@@ -643,7 +739,9 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                     }
                     Col::Disk => {
                         let v = proc.disk_read_bps + proc.disk_write_bps;
-                        ui.painter().with_clip_rect(cell).text(
+                        theme::text_clipped(
+                            ui,
+                            cell,
                             Pos2::new(cell.right() - 8.0, cell.center().y),
                             Align2::RIGHT_CENTER,
                             fmt_rate(v),
@@ -653,7 +751,9 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                     }
                     Col::Network => {
                         let v = proc.net_recv_bps + proc.net_send_bps;
-                        ui.painter().with_clip_rect(cell).text(
+                        theme::text_clipped(
+                            ui,
+                            cell,
                             Pos2::new(cell.right() - 8.0, cell.center().y),
                             Align2::RIGHT_CENTER,
                             fmt_rate(v),
@@ -663,7 +763,9 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                     }
                     Col::Gpu => {
                         if proc.gpu > 0.0 {
-                            ui.painter().with_clip_rect(cell).text(
+                            theme::text_clipped(
+                                ui,
+                                cell,
                                 Pos2::new(cell.right() - 8.0, cell.center().y),
                                 Align2::RIGHT_CENTER,
                                 fmt_percent(proc.gpu),
@@ -673,7 +775,9 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                         }
                     }
                     Col::User => {
-                        ui.painter().with_clip_rect(cell).text(
+                        theme::text_clipped(
+                            ui,
+                            cell,
                             Pos2::new(cell.left() + 8.0, cell.center().y),
                             Align2::LEFT_CENTER,
                             proc.user.as_deref().unwrap_or(""),
@@ -682,7 +786,9 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                         );
                     }
                     Col::Threads => {
-                        ui.painter().with_clip_rect(cell).text(
+                        theme::text_clipped(
+                            ui,
+                            cell,
                             Pos2::new(cell.right() - 8.0, cell.center().y),
                             Align2::RIGHT_CENTER,
                             proc.threads.to_string(),
@@ -691,7 +797,9 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                         );
                     }
                     Col::Pid => {
-                        ui.painter().with_clip_rect(cell).text(
+                        theme::text_clipped(
+                            ui,
+                            cell,
                             Pos2::new(cell.right() - 8.0, cell.center().y),
                             Align2::RIGHT_CENTER,
                             proc.pid.to_string(),
@@ -699,8 +807,32 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                             palette.text_dim,
                         );
                     }
+                    Col::Path => {
+                        theme::text_clipped(
+                            ui,
+                            cell,
+                            Pos2::new(cell.left() + 8.0, cell.center().y),
+                            Align2::LEFT_CENTER,
+                            proc.exe_path.as_deref().unwrap_or(""),
+                            font(12.5),
+                            palette.text_dim,
+                        );
+                    }
+                    Col::CommandLine => {
+                        theme::text_clipped(
+                            ui,
+                            cell,
+                            Pos2::new(cell.left() + 8.0, cell.center().y),
+                            Align2::LEFT_CENTER,
+                            proc.cmdline.as_deref().unwrap_or(""),
+                            font(12.5),
+                            palette.text_dim,
+                        );
+                    }
                     Col::Description => {
-                        ui.painter().with_clip_rect(cell).text(
+                        theme::text_clipped(
+                            ui,
+                            cell,
                             Pos2::new(cell.left() + 8.0, cell.center().y),
                             Align2::LEFT_CENTER,
                             proc.description.as_deref().unwrap_or(""),
@@ -757,6 +889,15 @@ pub fn draw_row(ui: &mut Ui, ctx: &mut DrawCtx<'_>, row: Row, out: &mut RowOut) 
                     }
                     ui.close_menu();
                 }
+                if ui
+                    .add_enabled(hwnd.is_some(), egui::Button::new("Переключиться на окно"))
+                    .clicked()
+                {
+                    if let Some(hwnd) = hwnd {
+                        actions.push(Action::FocusWindow(hwnd));
+                    }
+                    ui.close_menu();
+                }
                 if ui.button("Свойства").clicked() {
                     actions.push(Action::Properties(pid));
                     ui.close_menu();
@@ -808,7 +949,8 @@ fn draw_chevron(ui: &Ui, palette: &Palette, center: Pos2, expanded: bool, large:
 /// Полоска подсказки, когда ETW-данные недоступны.
 pub fn draw_banner(ui: &mut Ui, palette: &Palette, text: &str) -> bool {
     let rect = ui.available_rect_before_wrap();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(rect.width(), 30.0), Sense::hover());
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(rect.width(), theme::pt(30.0)), Sense::hover());
     ui.painter().rect_filled(rect, 0.0, palette.header);
     ui.painter().rect_stroke(
         rect,
@@ -824,7 +966,9 @@ pub fn draw_banner(ui: &mut Ui, palette: &Palette, text: &str) -> bool {
         Pos2::new(rect.left() + 8.0, rect.top()),
         Pos2::new(button.left() - 8.0, rect.bottom()),
     );
-    ui.painter().with_clip_rect(text_rect).text(
+    theme::text_clipped(
+        ui,
+        text_rect,
         Pos2::new(text_rect.left(), rect.center().y),
         Align2::LEFT_CENTER,
         text,
@@ -838,7 +982,8 @@ pub fn draw_banner(ui: &mut Ui, palette: &Palette, text: &str) -> bool {
         palette.button
     };
     ui.painter().rect_filled(button, 2.0, bg);
-    ui.painter().text(
+    theme::text(
+        ui,
         button.center(),
         Align2::CENTER_CENTER,
         "Перезапустить как администратор",
@@ -851,19 +996,7 @@ pub fn draw_banner(ui: &mut Ui, palette: &Palette, text: &str) -> bool {
 /// Кнопка «столбцы» и меню выбора.
 pub fn columns_menu(ui: &mut Ui, palette: &Palette, columns: &mut Vec<Col>) {
     egui::menu::menu_button(ui, "Столбцы", |ui| {
-        for col in [
-            Col::Name,
-            Col::Status,
-            Col::Cpu,
-            Col::Memory,
-            Col::Disk,
-            Col::Network,
-            Col::Gpu,
-            Col::User,
-            Col::Threads,
-            Col::Pid,
-            Col::Description,
-        ] {
+        for col in Col::all() {
             let mut on = columns.contains(&col);
             if ui.checkbox(&mut on, col.label()).clicked() {
                 if on {

@@ -1,14 +1,75 @@
 //! Тема оформления: палитра Win10, шрифт Segoe UI, размеры строк.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use eframe::egui::{
-    self, Color32, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle, Visuals,
+    self, Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Pos2, Rect, Stroke,
+    TextStyle, Visuals,
 };
+
+/// Текущий масштаб (пикселей на точку), обновляется каждый кадр.
+static PPP: AtomicU32 = AtomicU32::new(1250);
 
 pub const ROW_H: f32 = 26.0;
 pub const HEADER_H: f32 = 32.0;
 pub const FONT_SIZE: f32 = 13.5;
+
+pub fn update_scale(ctx: &egui::Context) {
+    let ppp = ctx.pixels_per_point();
+    if ppp.is_finite() && ppp > 0.1 {
+        PPP.store((ppp * 1000.0) as u32, Ordering::Relaxed);
+    }
+}
+
+pub fn ppp() -> f32 {
+    PPP.load(Ordering::Relaxed) as f32 / 1000.0
+}
+
+/// Размер в точках, выровненный по целым физическим пикселям.
+pub fn pt(points: f32) -> f32 {
+    let ppp = ppp();
+    (points * ppp).round() / ppp
+}
+
+pub fn row_h() -> f32 {
+    pt(ROW_H)
+}
+
+pub fn header_h() -> f32 {
+    pt(HEADER_H)
+}
+
+/// Позиция, привязанная к сетке физических пикселей — без «полупиксельного» мыла.
+pub fn snap_pos(pos: Pos2) -> Pos2 {
+    let ppp = ppp();
+    Pos2::new((pos.x * ppp).round() / ppp, (pos.y * ppp).round() / ppp)
+}
+
+pub fn text(
+    ui: &egui::Ui,
+    pos: Pos2,
+    anchor: Align2,
+    text: impl ToString,
+    font: FontId,
+    color: Color32,
+) {
+    ui.painter().text(snap_pos(pos), anchor, text, font, color);
+}
+
+pub fn text_clipped(
+    ui: &egui::Ui,
+    clip: Rect,
+    pos: Pos2,
+    anchor: Align2,
+    text: impl ToString,
+    font: FontId,
+    color: Color32,
+) {
+    ui.painter()
+        .with_clip_rect(clip)
+        .text(snap_pos(pos), anchor, text, font, color);
+}
 
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -98,12 +159,41 @@ impl Palette {
     }
 }
 
+/// Кнопка переключения светлой/тёмной темы. Рисуется вручную, чтобы не
+/// зависеть от наличия символов ☀/☾ в Segoe UI.
+pub fn theme_button(ui: &mut egui::Ui, palette: &Palette, dark: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(30.0, 24.0), egui::Sense::click());
+    let bg = if resp.hovered() {
+        ui.painter().rect_filled(rect, 4.0, palette.hover);
+        palette.hover
+    } else {
+        palette.bg
+    };
+    let center = rect.center();
+    if dark {
+        ui.painter().circle_filled(center, 6.0, palette.text);
+        ui.painter()
+            .circle_filled(center + egui::vec2(3.2, -2.0), 5.4, bg);
+    } else {
+        ui.painter().circle_filled(center, 4.5, palette.warn);
+        for i in 0..8 {
+            let angle = i as f32 * std::f32::consts::TAU / 8.0;
+            let dir = egui::vec2(angle.cos(), angle.sin());
+            ui.painter().line_segment(
+                [center + dir * 6.5, center + dir * 8.5],
+                Stroke::new(1.2_f32, palette.warn),
+            );
+        }
+    }
+    resp
+}
+
 pub fn font(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("segoe".into()))
+    FontId::new(pt(size), FontFamily::Name("segoe".into()))
 }
 
 pub fn bold(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("segoe-bold".into()))
+    FontId::new(pt(size), FontFamily::Name("segoe-bold".into()))
 }
 
 /// Устанавливает шрифты и визуальный стиль. Возвращает палитру.

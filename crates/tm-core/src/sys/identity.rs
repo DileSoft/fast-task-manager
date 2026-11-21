@@ -18,6 +18,93 @@ use windows_sys::Win32::System::Threading::{
 
 use super::wide;
 
+#[repr(C)]
+struct UnicodeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *mut u16,
+}
+
+const PROCESS_COMMAND_LINE_INFORMATION: u32 = 60;
+
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtQueryInformationProcess(
+        process_handle: HANDLE,
+        info_class: u32,
+        info: *mut c_void,
+        info_length: u32,
+        return_length: *mut u32,
+    ) -> i32;
+}
+
+/// Командная строка процесса через `ProcessCommandLineInformation`
+/// (Windows 8.1+). Работает без чтения памяти другого процесса.
+pub fn command_line(pid: u32) -> Option<String> {
+    if pid <= 4 {
+        return None;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+
+    let mut needed = 0u32;
+    let status = unsafe {
+        NtQueryInformationProcess(
+            handle,
+            PROCESS_COMMAND_LINE_INFORMATION,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+        )
+    };
+    let size = (needed as usize + 128).max(4096);
+    let mut buf = vec![0u8; size];
+    let mut ret = 0u32;
+    let status2 = unsafe {
+        NtQueryInformationProcess(
+            handle,
+            PROCESS_COMMAND_LINE_INFORMATION,
+            buf.as_mut_ptr() as *mut c_void,
+            size as u32,
+            &mut ret,
+        )
+    };
+    unsafe {
+        CloseHandle(handle);
+    }
+    if status2 < 0 {
+        return None;
+    }
+    let _ = status;
+
+    let unicode = unsafe { &*(buf.as_ptr() as *const UnicodeString) };
+    let len_bytes = unicode.length as usize;
+    if len_bytes == 0 || unicode.buffer.is_null() {
+        return None;
+    }
+    let base = buf.as_ptr() as usize;
+    let ptr = unicode.buffer as usize;
+    if ptr < base || ptr.saturating_add(len_bytes) > base + size {
+        return None;
+    }
+    let offset = ptr - base;
+    let bytes = &buf[offset..offset + len_bytes];
+    let wide: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let text = String::from_utf16_lossy(&wide).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Identity {
     pub exe_path: Option<String>,

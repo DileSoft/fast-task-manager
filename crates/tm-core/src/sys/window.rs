@@ -81,3 +81,48 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> windows_sys::co
 pub fn close_window(hwnd: isize) -> bool {
     unsafe { PostMessageW(hwnd as HWND, WM_CLOSE, 0, 0) != 0 }
 }
+
+/// Поднимает окно процесса на передний план.
+pub fn focus_window(hwnd: isize) -> bool {
+    use windows_sys::Win32::System::Threading::{
+        AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    };
+
+    let hwnd = hwnd as HWND;
+    if hwnd.is_null() {
+        return false;
+    }
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        } else {
+            ShowWindow(hwnd, SW_SHOW);
+        }
+
+        if SetForegroundWindow(hwnd) != 0 {
+            BringWindowToTop(hwnd);
+            return true;
+        }
+
+        // Обход ограничения Windows на смену переднего плана: временно
+        // присоединяем очередь ввода к потоку окна-цели.
+        let mut pid = 0u32;
+        let tid = GetWindowThreadProcessId(hwnd, &mut pid);
+        let current = GetCurrentThreadId();
+        if tid != 0
+            && tid != current
+            && pid != 0
+            && pid != GetCurrentProcessId()
+            && AttachThreadInput(current, tid, 1) != 0
+        {
+            let ok = SetForegroundWindow(hwnd);
+            BringWindowToTop(hwnd);
+            AttachThreadInput(current, tid, 0);
+            return ok != 0;
+        }
+        false
+    }
+}

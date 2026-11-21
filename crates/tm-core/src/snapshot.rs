@@ -49,6 +49,7 @@ pub struct ProcInfo {
     pub exe_path: Option<Arc<str>>,
     pub description: Option<Arc<str>>,
     pub user: Option<Arc<str>>,
+    pub cmdline: Option<Arc<str>>,
     pub elevated: bool,
     pub session_id: u32,
     pub cpu: f32,
@@ -162,6 +163,30 @@ pub struct SystemStats {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct DiskStats {
+    /// «Диск 0».
+    pub name: String,
+    /// Тома этого диска: «C: D:».
+    pub volumes: String,
+    pub active: f32,
+    pub read_bps: f64,
+    pub write_bps: f64,
+    pub response_ms: f64,
+    pub total: u64,
+    pub free: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NetStats {
+    /// Понятное имя подключения: «Ethernet», «Wi-Fi».
+    pub name: String,
+    pub description: String,
+    pub recv_bps: f64,
+    pub send_bps: f64,
+    pub link_bps: u64,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct Capabilities {
     pub etw_active: bool,
     pub etw_error: Option<String>,
@@ -179,8 +204,15 @@ pub struct Snapshot {
     pub collect_ms: f32,
     pub procs: Vec<ProcInfo>,
     pub system: SystemStats,
+    /// Физические диски (как в диспетчере задач: «Диск 0», «Диск 1»).
+    pub disks: Vec<DiskStats>,
+    /// Сетевые адаптеры с ненулевым трафиком или активным статусом.
+    pub nets: Vec<NetStats>,
     pub history: Vec<HistPoint>,
     pub core_history: Vec<Vec<f32>>,
+    pub disk_history: Vec<Vec<f32>>,
+    pub net_recv_history: Vec<Vec<f32>>,
+    pub net_send_history: Vec<Vec<f32>>,
     pub capabilities: Capabilities,
 }
 
