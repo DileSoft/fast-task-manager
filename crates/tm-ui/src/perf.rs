@@ -91,7 +91,7 @@ struct Section {
 
 fn plural(n: usize, one: &str, few: &str, many: &str) -> String {
     let tail = n % 100;
-    let form = if tail >= 11 && tail <= 14 {
+    let form = if (11..=14).contains(&tail) {
         many
     } else {
         match n % 10 {
