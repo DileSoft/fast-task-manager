@@ -19,6 +19,8 @@ pub struct Settings {
     pub perf_index: usize,
     pub window_w: f32,
     pub window_h: f32,
+    pub window_x: Option<f32>,
+    pub window_y: Option<f32>,
 }
 
 impl Default for Settings {
@@ -43,6 +45,8 @@ impl Default for Settings {
             perf_index: 0,
             window_w: 900.0,
             window_h: 570.0,
+            window_x: None,
+            window_y: None,
         }
     }
 }

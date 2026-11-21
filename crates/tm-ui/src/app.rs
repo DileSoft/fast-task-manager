@@ -64,6 +64,8 @@ pub struct App {
     cmdline_enabled: bool,
     ctx: egui::Context,
     last_window_size: (f32, f32),
+    last_window_pos: Option<(f32, f32)>,
+    dark_override: bool,
 }
 
 impl App {
@@ -129,6 +131,11 @@ impl App {
             cmdline_enabled,
             ctx: cc.egui_ctx.clone(),
             last_window_size: (settings.window_w.max(760.0), settings.window_h.max(460.0)),
+            last_window_pos: match (settings.window_x, settings.window_y) {
+                (Some(x), Some(y)) => Some((x, y)),
+                _ => None,
+            },
+            dark_override: settings.dark.is_some(),
         };
         app.rebuild_rows();
         app
@@ -147,11 +154,17 @@ impl App {
             group_by_type: self.group_by_type,
             interval_ms: self.interval_ms,
             paused: self.paused,
-            dark: Some(self.dark),
+            dark: if self.dark_override {
+                Some(self.dark)
+            } else {
+                None
+            },
             perf_kind: self.perf_resource.kind().to_string(),
             perf_index: self.perf_resource.index(),
             window_w,
             window_h,
+            window_x: self.last_window_pos.map(|p| p.0),
+            window_y: self.last_window_pos.map(|p| p.1),
         }
     }
 
@@ -352,6 +365,7 @@ impl App {
                         let resp = theme::theme_button(ui, &self.palette, self.dark);
                         if resp.on_hover_text("Сменить тему").clicked() {
                             self.dark = !self.dark;
+                            self.dark_override = true;
                             self.palette = theme::install(ctx, self.dark);
                             self.settings_dirty = true;
                         }
@@ -717,6 +731,12 @@ impl eframe::App for App {
         theme::update_scale(ctx);
         if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
             self.last_window_size = (rect.width(), rect.height());
+        }
+        if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
+            let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+            if !minimized {
+                self.last_window_pos = Some((rect.min.x, rect.min.y));
+            }
         }
         let snap = self.sampler.latest();
         if snap.seq != self.snapshot.seq {

@@ -16,11 +16,17 @@ fn main() -> eframe::Result<()> {
     let height = settings.window_h.clamp(460.0, 3000.0);
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([width, height])
-            .with_min_inner_size([760.0, 460.0])
-            .with_title("Диспетчер задач")
-            .with_icon(app_icon()),
+        viewport: {
+            let mut viewport = egui::ViewportBuilder::default()
+                .with_inner_size([width, height])
+                .with_min_inner_size([760.0, 460.0])
+                .with_title("Диспетчер задач")
+                .with_icon(app_icon());
+            if let (Some(x), Some(y)) = (settings.window_x, settings.window_y) {
+                viewport = viewport.with_position([x, y]);
+            }
+            viewport
+        },
         ..Default::default()
     };
     eframe::run_native(

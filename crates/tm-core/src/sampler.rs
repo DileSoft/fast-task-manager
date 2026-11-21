@@ -523,6 +523,10 @@ impl Collector {
             self.disk_space_tick = self.seq;
         }
         let refresh_capacity = self.disk_space_tick == self.seq;
+        let refresh_capacity = self.disk_space_tick == self.seq
+            || disk_map
+                .keys()
+                .any(|number| !self.disk_capacity.contains_key(number));
         if refresh_capacity {
             self.disk_capacity.clear();
             for (number, (volumes, ..)) in &disk_map {
